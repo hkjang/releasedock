@@ -1,0 +1,37 @@
+[Unit]
+Description=ReleaseDock isolated release runner
+After=network-online.target releasedock-server.service releasedock-executor.socket
+Wants=network-online.target
+Requires=releasedock-executor.socket
+
+[Service]
+Type=simple
+User=releasedock-runner
+Group=releasedock-workspace
+SupplementaryGroups=releasedock releasedock-executor-client
+WorkingDirectory=/opt/releasedock/current
+EnvironmentFile=/etc/releasedock/releasedock.env
+# Runner needs only the DB DSN and root encryption key from the shared five-key
+# bootstrap file. Keep web/bootstrap-only values out of its process environ.
+UnsetEnvironment=BOOTSTRAP_ADMIN BOOTSTRAP_ADMIN_PASSWORD PORT
+RuntimeDirectory=releasedock-credentials
+RuntimeDirectoryMode=0710
+RuntimeDirectoryPreserve=no
+ExecStart=/opt/releasedock/current/bin/releasedock-runner
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=90s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/releasedock /var/log/releasedock /run/releasedock-credentials
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

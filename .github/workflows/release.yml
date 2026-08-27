@@ -1,0 +1,95 @@
+name: offline-release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: releasedock-release-password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: |
+            backend/go.sum
+            runner/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Verify tag
+        run: test "${GITHUB_REF_NAME}" = "v$(tr -d '[:space:]' < VERSION)"
+      - name: Verify Go dependency checksums
+        run: |
+          (cd backend && go mod download && go mod verify)
+          (cd runner && go mod download && go mod verify)
+      - name: Build offline package
+        env:
+          TEST_POSTGRES_DSN: postgres://postgres:releasedock-release-password@127.0.0.1:5432/postgres?sslmode=disable
+        run: ./scripts/package-release.sh
+      - name: Stage release assets
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          mkdir release-assets
+          cp "release/releasedock-v${version}.tar.gz" \
+            "release/releasedock-v${version}.tar.gz.sha256" release-assets/
+          (cd release-assets && sha256sum --check --strict "releasedock-v${version}.tar.gz.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: releasedock-offline-${{ github.ref_name }}
+          path: release-assets/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: releasedock-offline-${{ github.ref_name }}
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          sha256sum --check --strict "releasedock-v${version}.tar.gz.sha256"
+          gh release create "v${version}" \
+            "releasedock-v${version}.tar.gz" \
+            "releasedock-v${version}.tar.gz.sha256" \
+            --verify-tag \
+            --generate-notes \
+            --title "ReleaseDock v${version}"

@@ -1,0 +1,61 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: releasedock-ci-password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: |
+            backend/go.sum
+            runner/go.sum
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Verify Go dependency checksums
+        run: |
+          (cd backend && go mod download && go mod verify)
+          (cd runner && go mod download && go mod verify)
+      - run: npm ci
+        working-directory: web
+      - run: npm test -- --run
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+      - run: go test ./...
+        env:
+          TEST_POSTGRES_DSN: postgres://postgres:releasedock-ci-password@127.0.0.1:5432/postgres?sslmode=disable
+        working-directory: backend
+      - run: go test ./...
+        env:
+          TEST_POSTGRES_DSN: postgres://postgres:releasedock-ci-password@127.0.0.1:5432/postgres?sslmode=disable
+        working-directory: runner

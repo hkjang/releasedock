@@ -1,0 +1,31 @@
+[Unit]
+Description=ReleaseDock API and web portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=releasedock
+Group=releasedock
+WorkingDirectory=/opt/releasedock/current
+EnvironmentFile=/etc/releasedock/releasedock.env
+ExecStart=/opt/releasedock/current/bin/releasedock-server
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/releasedock /var/log/releasedock
+# Artifacts are 0640 so the separate Runner account can read them via the
+# shared releasedock group; secrets remain encrypted in PostgreSQL.
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

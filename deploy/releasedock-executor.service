@@ -1,0 +1,56 @@
+[Unit]
+Description=ReleaseDock unprivileged approved-script executor
+After=network-online.target releasedock-executor.socket
+Wants=network-online.target
+Requires=releasedock-executor.socket
+
+[Service]
+Type=simple
+User=releasedock-executor
+Group=releasedock-workspace
+WorkingDirectory=/opt/releasedock/current
+ExecStart=/opt/releasedock/current/bin/releasedock-executor
+Sockets=releasedock-executor.socket
+Restart=on-failure
+RestartSec=5s
+# The executor handles one request and exits. Any background/double-fork/setsid
+# child remains in this cgroup and is killed before the next socket activation.
+KillMode=control-group
+SendSIGKILL=yes
+TimeoutStopSec=5s
+
+# This process intentionally receives no EnvironmentFile, PostgreSQL DSN,
+# encryption key, bootstrap credential, or container-runtime group.
+UnsetEnvironment=POSTGRES_DSN BOOTSTRAP_ADMIN BOOTSTRAP_ADMIN_PASSWORD ENCRYPTION_KEY PORT
+RuntimeDirectory=releasedock-executor-private
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=no
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RemoveIPC=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+ReadOnlyPaths=-/run/releasedock-credentials
+ReadWritePaths=/var/lib/releasedock/workspaces /run/releasedock-executor-private
+InaccessiblePaths=/etc/releasedock -/run/docker.sock -/var/run/docker.sock -/run/containerd -/run/podman
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target

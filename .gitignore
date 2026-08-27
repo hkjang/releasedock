@@ -1,0 +1,30 @@
+# Build outputs
+/dist/
+/release/
+/coverage/
+*.tar.gz
+*.sha256
+
+# Go
+*.test
+*.out
+/backend/releasedock-server
+/runner/releasedock-runner
+
+# Node
+/web/node_modules/
+/web/dist/
+/web/.vite/
+
+# Runtime state and secrets
+/.env
+/.env.*
+!/deploy/releasedock.env.example
+/data/
+*.log
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
