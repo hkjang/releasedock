@@ -13,6 +13,7 @@ import { ProfilePage } from '../pages/personal/ProfilePage';
 import { ReleaseDetailPage } from '../pages/releases/ReleaseDetailPage';
 import { ReleasesPage } from '../pages/releases/ReleasesPage';
 import { NewReleasePage } from '../pages/releases/NewReleasePage';
+import { AdvancedReleasePage } from '../pages/releases/AdvancedReleasePage';
 import { ForbiddenPage, NotFoundPage } from '../pages/SystemPages';
 import { VersionProvider } from './VersionContext';
 
@@ -29,6 +30,7 @@ export function App() {
                   <Route index element={<RequirePermission permission="releases.read"><DashboardPage /></RequirePermission>} />
                   <Route path="releases" element={<RequirePermission permission="releases.read"><ReleasesPage /></RequirePermission>} />
                   <Route path="releases/new" element={<RequirePermission permission="releases.create"><NewReleasePage /></RequirePermission>} />
+                  <Route path="releases/new/advanced" element={<RequirePermission permission="releases.create"><RequirePermission permission="applications.read"><RequirePermission permission="profiles.read"><AdvancedReleasePage /></RequirePermission></RequirePermission></RequirePermission>} />
                   <Route path="releases/:id" element={<RequirePermission permission="releases.read"><ReleaseDetailPage /></RequirePermission>} />
                   <Route path="personal/profile" element={<ProfilePage />} />
                   <Route path="personal/api-keys" element={<RequirePermission permission="keys.manage"><ApiKeysPage /></RequirePermission>} />
@@ -36,6 +38,7 @@ export function App() {
 
                   <Route path="admin/applications" element={<RequirePermission permission="applications.read"><AdminResourcePage config={resourceConfigs.applications} /></RequirePermission>} />
                   <Route path="admin/environments" element={<RequirePermission permission="applications.read"><AdminResourcePage config={resourceConfigs.environments} /></RequirePermission>} />
+                  <Route path="admin/deployment-presets" element={<RequirePermission permission="admin.presets.read"><AdminResourcePage config={resourceConfigs.presets} /></RequirePermission>} />
                   <Route path="admin/deployment-profiles" element={<RequirePermission permission="profiles.read"><AdminResourcePage config={resourceConfigs.profiles} /></RequirePermission>} />
                   <Route path="admin/scripts" element={<RequirePermission permission="admin.scripts.read"><AdminResourcePage config={resourceConfigs.scripts} /></RequirePermission>} />
                   <Route path="admin/registries" element={<RequirePermission permission="admin.registries.read"><AdminResourcePage config={resourceConfigs.registries} /></RequirePermission>} />

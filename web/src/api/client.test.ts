@@ -94,11 +94,36 @@ describe('API client', () => {
     });
   });
 
-	it('maps UI pagination to the backend limit and offset contract', async () => {
+  it('maps UI pagination to the backend limit and offset contract', async () => {
 		const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ items: [], total: 0, page: 2, pageSize: 25 }));
 		await api.releases({ page: 2, pageSize: 25, status: 'SUCCESS' });
 		expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/releases?limit=25&offset=25&status=SUCCESS');
 	});
+
+  it('uses the filename-only preflight contract', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ data: { filename: 'ai-portal-v2.4.1.tar.gz' } }));
+    await api.quickReleasePreflight('ai-portal-v2.4.1.tar.gz');
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe('/api/v1/releases/preflight');
+    expect(options?.method).toBe('POST');
+    expect(JSON.parse(String(options?.body))).toEqual({ filename: 'ai-portal-v2.4.1.tar.gz' });
+  });
+
+  it('uploads only the artifact and optional notes for a quick release', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ data: { id: 'release-1' } }, 201));
+    const artifact = new File(['package'], 'ai-portal-v2.4.1.tar.gz', { type: 'application/gzip' });
+    await api.createQuickRelease({ artifact, expectedPresetId: 'preset-1', expectedPresetUpdatedAt: '2026-08-27T00:00:00Z', expectedCurrentVersion: '2.4.0', notes: 'security fixes' });
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe('/api/v1/releases/quick');
+    expect(options?.method).toBe('POST');
+    const body = options?.body as FormData;
+    expect(body.get('artifact')).toBe(artifact);
+    expect(body.get('expectedPresetId')).toBe('preset-1');
+    expect(body.get('expectedPresetUpdatedAt')).toBe('2026-08-27T00:00:00Z');
+    expect(body.get('expectedCurrentVersion')).toBe('2.4.0');
+    expect(body.get('notes')).toBe('security fixes');
+    expect([...body.keys()]).toEqual(['artifact', 'expectedPresetId', 'expectedPresetUpdatedAt', 'expectedCurrentVersion', 'notes']);
+  });
 
   it('preserves server pagination while normalizing admin users', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({

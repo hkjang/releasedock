@@ -72,7 +72,7 @@ const sections: NavSection[] = [
     items: [
       { label: '대시보드', path: '/', icon: DashboardRoundedIcon, permission: 'releases.read' },
       { label: '릴리즈', path: '/releases', icon: RocketLaunchRoundedIcon, permission: 'releases.read' },
-      { label: '새 릴리즈 등록', path: '/releases/new', icon: PlaylistAddRoundedIcon, permission: 'releases.create' },
+      { label: '새 버전 배포', path: '/releases/new', icon: PlaylistAddRoundedIcon, permission: 'releases.create' },
     ],
   },
   {
@@ -82,6 +82,7 @@ const sections: NavSection[] = [
     items: [
       { label: '애플리케이션', path: '/admin/applications', icon: AppsRoundedIcon, permission: 'applications.read' },
       { label: '환경', path: '/admin/environments', icon: CloudQueueRoundedIcon, permission: 'applications.read' },
+      { label: '배포 프리셋', path: '/admin/deployment-presets', icon: TuneRoundedIcon, permission: 'admin.presets.read' },
       { label: '배포 프로필', path: '/admin/deployment-profiles', icon: TuneRoundedIcon, permission: 'profiles.read' },
       { label: '스크립트', path: '/admin/scripts', icon: TerminalRoundedIcon, permission: 'admin.scripts.read' },
       { label: 'Harbor Registry', path: '/admin/registries', icon: StorageRoundedIcon, permission: 'admin.registries.read' },

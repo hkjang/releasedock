@@ -3,6 +3,7 @@ import type {
   Application,
   AuditEvent,
   DashboardSummary,
+  QuickReleasePreflight,
   DeploymentProfile,
   Environment,
   PageResult,
@@ -151,6 +152,14 @@ export interface NewReleaseInput {
   artifact: File;
 }
 
+export interface QuickReleaseInput {
+  artifact: File;
+  expectedPresetId: string;
+  expectedPresetUpdatedAt: string;
+  expectedCurrentVersion: string;
+  notes?: string;
+}
+
 type WireValue = Record<string, unknown>;
 
 type SettingSection = 'general' | 'oidc' | 'ai' | 'approval' | 'storage' | 'runner';
@@ -295,6 +304,17 @@ export const api = {
     if (input.deploymentProfileId) form.set('deploymentProfileId', input.deploymentProfileId);
     if (input.notes) form.set('notes', input.notes);
     return request<Release>('/releases', { method: 'POST', body: form });
+  },
+  quickReleasePreflight: (filename: string) =>
+    request<QuickReleasePreflight>('/releases/preflight', { method: 'POST', body: { filename } }),
+  createQuickRelease: (input: QuickReleaseInput) => {
+    const form = new FormData();
+    form.set('artifact', input.artifact);
+    form.set('expectedPresetId', input.expectedPresetId);
+    form.set('expectedPresetUpdatedAt', input.expectedPresetUpdatedAt);
+    form.set('expectedCurrentVersion', input.expectedCurrentVersion);
+    if (input.notes) form.set('notes', input.notes);
+    return request<Release>('/releases/quick', { method: 'POST', body: form });
   },
   releaseAction: (id: string, action: 'submit-review' | 'review' | 'approve' | 'reject' | 'deploy' | 'rollback' | 'retry', comment?: string) =>
     request<Release>(`/releases/${encodeURIComponent(id)}/${action}`, {

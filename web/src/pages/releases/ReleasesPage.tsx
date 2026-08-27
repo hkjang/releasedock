@@ -22,7 +22,7 @@ import { api } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { EmptyState, PageError, PageLoading } from '../../components/Feedback';
 import { PageHeader } from '../../components/PageHeader';
-import { StatusChip } from '../../components/StatusChip';
+import { SimpleReleaseStatusChip } from '../../components/StatusChip';
 import { useAsync } from '../../hooks/useAsync';
 import { formatBytes, formatDate } from '../../utils/format';
 
@@ -55,7 +55,7 @@ export function ReleasesPage() {
 
   return (
     <>
-      <PageHeader title="릴리즈" description="등록된 패키지와 배포 진행 상태, 결과 이력을 조회합니다." action={canCreate ? <Button component={RouterLink} to="/releases/new" variant="contained" startIcon={<AddRoundedIcon />}>새 릴리즈</Button> : undefined} />
+      <PageHeader title="릴리즈" description="등록된 패키지와 배포 진행 상태, 결과 이력을 조회합니다." action={canCreate ? <Button component={RouterLink} to="/releases/new" variant="contained" startIcon={<AddRoundedIcon />}>새 버전 배포</Button> : undefined} />
       <Card>
         <Stack direction={{ xs: 'column', md: 'row' }} gap={1.5} sx={{ p: 2 }}>
           <TextField
@@ -87,7 +87,7 @@ export function ReleasesPage() {
                         <TableCell><Typography fontWeight={750}>{release.applicationName || release.applicationId}</Typography><Typography variant="body2" color="text.secondary">v{release.version}</Typography></TableCell>
                         <TableCell>{release.environmentName || release.environmentId}</TableCell>
                         <TableCell><Typography variant="body2" noWrap sx={{ maxWidth: 250 }}>{release.artifactName || '—'}</Typography><Typography variant="caption" color="text.secondary">{formatBytes(release.artifactSize)}</Typography></TableCell>
-                        <TableCell><StatusChip status={release.status} /></TableCell>
+                        <TableCell><SimpleReleaseStatusChip status={release.status} /></TableCell>
                         <TableCell>{release.createdBy?.displayName || release.createdBy?.username || '—'}</TableCell>
                         <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(release.createdAt)}</TableCell>
                       </TableRow>

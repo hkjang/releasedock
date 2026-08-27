@@ -26,7 +26,7 @@ import { api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { EmptyState, PageError, PageLoading } from '../components/Feedback';
 import { PageHeader } from '../components/PageHeader';
-import { StatusChip } from '../components/StatusChip';
+import { SimpleReleaseStatusChip } from '../components/StatusChip';
 import { useAsync } from '../hooks/useAsync';
 import type { DashboardSummary, Release } from '../types/domain';
 import { formatDate } from '../utils/format';
@@ -90,7 +90,7 @@ function RecentReleases({ releases, canCreate }: { releases: Release[]; canCreat
               <TableCell><Typography fontWeight={700}>{release.applicationName || release.applicationId}</Typography></TableCell>
               <TableCell>{release.version}</TableCell>
               <TableCell>{release.environmentName || release.environmentId}</TableCell>
-              <TableCell><StatusChip status={release.status} /></TableCell>
+              <TableCell><SimpleReleaseStatusChip status={release.status} /></TableCell>
               <TableCell sx={{ whiteSpace: 'nowrap' }}>{formatDate(release.createdAt)}</TableCell>
             </TableRow>
           ))}
@@ -109,7 +109,7 @@ export function DashboardPage() {
       <PageHeader
         title="릴리즈 대시보드"
         description="검증, 승인, 배포와 상태 확인 흐름을 한눈에 확인합니다."
-        action={canCreate ? <Button component={RouterLink} to="/releases/new" variant="contained" startIcon={<AddRoundedIcon />}>새 릴리즈</Button> : undefined}
+        action={canCreate ? <Button component={RouterLink} to="/releases/new" variant="contained" startIcon={<AddRoundedIcon />}>새 버전 배포</Button> : undefined}
       />
       {state.loading && <PageLoading />}
       {state.error && !state.loading && <PageError error={state.error} onRetry={() => void state.reload()} />}

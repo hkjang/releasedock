@@ -42,13 +42,26 @@ make build
 
 개발 상세는 각 하위 디렉터리의 README를 참고하십시오.
 
+## Quick Deploy
+
+관리자가 **서비스 배포 프리셋**에서 아티팩트 접두어와 애플리케이션·환경·배포 정책을 한 번 연결하면, 일반 사용자는 배포 프로필을 알 필요가 없습니다. 새 릴리즈 화면에 규칙에 맞는 패키지를 끌어 놓으면 서비스, 현재 버전, 신규 버전과 대상 환경을 자동으로 확인하고 **배포 요청** 한 번으로 진행합니다.
+
+```text
+<artifact-prefix>-v<semver>.tar.gz
+
+ai-portal-v2.4.1.tar.gz
+ai-portal-v2.4.2-rc1.tar.gz
+```
+
+접두어는 소문자 영문·숫자와 내부 하이픈만 허용하며 패키지 이름은 대소문자를 구분합니다. 버전은 SemVer core와 선택적 prerelease를 사용하며 Quick Deploy는 현재 운영 버전보다 높은 순방향 버전만 허용합니다. 이전 버전 복구는 별도 복구 절차를 사용합니다. 승인 정책이 적용된 대상은 자동으로 검토 요청 상태가 되고, 승인이 필요하지 않은 대상은 즉시 배포 대기열로 이동합니다. 관리자가 프리셋의 승인 후 자동 배포를 활성화하면 승인과 배포 작업 생성도 하나의 작업으로 처리됩니다.
+
 ## 폐쇄망 배포
 
 인터넷이 연결된 빌드 환경에서 아래 명령을 실행하면 런타임 의존성이 없는 Linux amd64 바이너리와 정적 웹 자산, 설치 스크립트만 포함한 파일을 만듭니다.
 
 ```bash
 make package
-# release/releasedock-v0.1.0.tar.gz
+# release/releasedock-v0.2.0.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.
@@ -65,4 +78,4 @@ make package
 - MCP Origin 검증, 인증 및 권한 검사
 - AI endpoint는 관리자 allowlist 설정만 사용하며 streaming을 기본값으로 사용
 
-자세한 내용은 [아키텍처](docs/architecture.md)와 [폐쇄망 운영 가이드](docs/offline-install.md)를 참고하십시오.
+자세한 내용은 [아키텍처](docs/architecture.md), [Quick Deploy 운영 가이드](docs/quick-deploy.md)와 [폐쇄망 운영 가이드](docs/offline-install.md)를 참고하십시오.

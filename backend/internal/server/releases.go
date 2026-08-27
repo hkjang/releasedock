@@ -18,6 +18,7 @@ import (
 
 	"github.com/hkjang/releasedock/backend/internal/secure"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 type releaseInput struct {
@@ -61,7 +62,8 @@ func (s *Server) listReleases(w http.ResponseWriter, r *http.Request) {
 
 const releaseSelect = `
 	SELECT r.id::text,r.application_id::text,a.name,r.environment_id::text,e.name,
-	       r.profile_id::text,p.name,r.version,r.notes,r.status,r.requested_operation,r.rollback_source_release_id::text,r.rollback_source_job_id::text,r.retry_source_job_id::text,rollback_source.version,r.created_by,u.username,
+	       r.profile_id::text,p.name,r.version,r.notes,r.status,r.requested_operation,r.rollback_source_release_id::text,r.rollback_source_job_id::text,r.retry_source_job_id::text,
+	       r.deployment_preset_id::text,r.quick_release,r.auto_deploy_after_approval,r.quick_base_release_id::text,r.quick_base_job_id::text,rollback_source.version,r.created_by,u.username,
 	       r.decision_note,r.created_at,r.updated_at,
 	       art.id::text,art.original_filename,art.size_bytes,art.sha256,
 	       (r.status IN ('PENDING_REVIEW','UNDER_REVIEW') OR (settings.approval_enabled AND (p.approval_required OR e.protected OR upper(e.code)=ANY(regexp_split_to_array(upper(COALESCE(settings.approval_config->>'protectedEnvironments','')), '[[:space:]]*,[[:space:]]*'))))),
@@ -111,12 +113,12 @@ func (s *Server) releaseRows(r *http.Request, limit, offset int, status, search 
 
 func scanRelease(row rowScanner) (map[string]any, error) {
 	var id, appID, appName, envID, envName, profileID, profileName, version, notes, status, requestedOperation, creatorID, creatorName, decision string
-	var rollbackSourceID, rollbackSourceJobID, retrySourceJobID, rollbackSourceVersion, artifactID, artifactName, checksum *string
+	var rollbackSourceID, rollbackSourceJobID, retrySourceJobID, deploymentPresetID, quickBaseReleaseID, quickBaseJobID, rollbackSourceVersion, artifactID, artifactName, checksum *string
 	var artifactSize *int64
 	var created, updated time.Time
 	var started, finished *time.Time
-	var approvalRequired, rollbackEligible, retryEligible bool
-	if err := row.Scan(&id, &appID, &appName, &envID, &envName, &profileID, &profileName, &version, &notes, &status, &requestedOperation, &rollbackSourceID, &rollbackSourceJobID, &retrySourceJobID, &rollbackSourceVersion, &creatorID, &creatorName, &decision, &created, &updated, &artifactID, &artifactName, &artifactSize, &checksum, &approvalRequired, &started, &finished, &rollbackEligible, &retryEligible); err != nil {
+	var approvalRequired, rollbackEligible, retryEligible, quickRelease, autoDeployAfterApproval bool
+	if err := row.Scan(&id, &appID, &appName, &envID, &envName, &profileID, &profileName, &version, &notes, &status, &requestedOperation, &rollbackSourceID, &rollbackSourceJobID, &retrySourceJobID, &deploymentPresetID, &quickRelease, &autoDeployAfterApproval, &quickBaseReleaseID, &quickBaseJobID, &rollbackSourceVersion, &creatorID, &creatorName, &decision, &created, &updated, &artifactID, &artifactName, &artifactSize, &checksum, &approvalRequired, &started, &finished, &rollbackEligible, &retryEligible); err != nil {
 		return nil, err
 	}
 	approvalStatus := ""
@@ -135,6 +137,8 @@ func scanRelease(row rowScanner) (map[string]any, error) {
 		"deploymentProfileId": profileID, "deploymentProfileName": profileName, "version": version, "notes": notes, "status": status,
 		"requestedOperation": requestedOperation, "rollbackSourceReleaseId": rollbackSourceID, "rollbackSourceJobId": rollbackSourceJobID, "rollbackSourceVersion": rollbackSourceVersion,
 		"retrySourceJobId": retrySourceJobID, "retryRequested": retrySourceJobID != nil,
+		"deploymentPresetId": deploymentPresetID, "quickRelease": quickRelease, "autoDeployAfterApproval": autoDeployAfterApproval,
+		"quickBaseReleaseId": quickBaseReleaseID, "quickBaseJobId": quickBaseJobID,
 		"rollbackEligible": rollbackEligible, "retryEligible": retryEligible,
 		"artifactId": artifactID, "artifactName": artifactName, "artifactSize": artifactSize, "checksum": checksum, "contentUploaded": artifactID != nil,
 		"createdBy": map[string]any{"id": creatorID, "username": creatorName}, "createdAt": created, "updatedAt": updated, "startedAt": started, "finishedAt": finished,
@@ -512,39 +516,120 @@ func (s *Server) persistArtifact(r *http.Request, releaseID, filename, mediaType
 		return nil, errors.New("artifact storage transaction could not be started")
 	}
 	defer tx.Rollback(r.Context()) //nolint:errcheck
-	var releaseStatus string
-	if err := tx.QueryRow(r.Context(), `SELECT status FROM releases WHERE id=$1 FOR UPDATE`, releaseID).Scan(&releaseStatus); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, errors.New("release not found or cannot accept artifacts")
+	result, err := s.persistArtifactTx(r, tx, releaseID, filename, mediaType, file, cfg, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		visible, verifyErr := s.artifactCommitVisible(result.id)
+		if visible {
+			// COMMIT reached PostgreSQL even though the client observed an
+			// error. Treat the durable artifact row as the authoritative result.
+		} else if commitDefinitelyRolledBack(err) {
+			result.cleanup()
+			return nil, errors.New("artifact metadata could not be committed")
+		} else {
+			s.log.Warn("artifact commit result could not be reconciled; stored content preserved", "artifact_id", result.id, "commit_error", err, "verify_error", verifyErr)
+			return nil, errors.New("artifact commit result is unknown; stored content was preserved for recovery")
 		}
-		return nil, errors.New("release state could not be locked")
+	}
+	principal, _ := principalFrom(r)
+	s.store.Audit(r.Context(), principal.UserID, "artifact.upload", "artifact", result.id, "success", remoteIP(r), r.UserAgent(), nil)
+	return result.item, nil
+}
+
+func (s *Server) artifactCommitVisible(artifactID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		var visible bool
+		lastErr = s.store.Pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM release_artifacts WHERE id=$1)`, artifactID).Scan(&visible)
+		if lastErr == nil && visible {
+			return true, nil
+		}
+		if attempt < 2 {
+			select {
+			case <-ctx.Done():
+				return false, ctx.Err()
+			case <-time.After(100 * time.Millisecond):
+			}
+		}
+	}
+	return false, lastErr
+}
+
+func commitDefinitelyRolledBack(err error) bool {
+	if errors.Is(err, pgx.ErrTxCommitRollback) {
+		return true
+	}
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError)
+}
+
+type persistedArtifactResult struct {
+	id      string
+	item    map[string]any
+	cleanup func()
+}
+
+func syncDirectory(path string) error {
+	directory, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}
+
+func (s *Server) persistArtifactTx(r *http.Request, tx pgx.Tx, releaseID, filename, mediaType string, file multipart.File, cfg appSettingsResponse, allowQuickInitial bool) (persistedArtifactResult, error) {
+	var releaseStatus string
+	var quickRelease bool
+	if err := tx.QueryRow(r.Context(), `SELECT status,quick_release FROM releases WHERE id=$1 FOR UPDATE`, releaseID).Scan(&releaseStatus, &quickRelease); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return persistedArtifactResult{}, errors.New("release not found or cannot accept artifacts")
+		}
+		return persistedArtifactResult{}, errors.New("release state could not be locked")
 	}
 	if releaseStatus != "DRAFT" && releaseStatus != "UPLOADED" && releaseStatus != "REJECTED" {
-		return nil, errors.New("release not found or cannot accept artifacts")
+		return persistedArtifactResult{}, errors.New("release not found or cannot accept artifacts")
+	}
+	if quickRelease && !allowQuickInitial {
+		return persistedArtifactResult{}, errors.New("quick release artifacts are immutable; create a new quick release instead")
 	}
 	// Hold a shared lock for the complete file write and metadata insert. Storage
 	// path changes take an exclusive row lock, so a relative artifact can never
 	// be recorded against a different root than the one it was written under.
 	if err := tx.QueryRow(r.Context(), `SELECT artifact_storage_path,artifact_max_bytes FROM app_settings WHERE id='default' FOR SHARE`).Scan(&cfg.ArtifactStoragePath, &cfg.ArtifactMaxBytes); err != nil {
-		return nil, errors.New("artifact storage settings are unavailable")
+		return persistedArtifactResult{}, errors.New("artifact storage settings are unavailable")
 	}
 	id, _ := secure.NewID()
 	if !filepath.IsAbs(cfg.ArtifactStoragePath) {
-		return nil, errors.New("artifact storage root must be absolute")
+		return persistedArtifactResult{}, errors.New("artifact storage root must be absolute")
 	}
 	if err := os.MkdirAll(cfg.ArtifactStoragePath, 0750); err != nil {
-		return nil, errors.New("artifact storage root is unavailable")
+		return persistedArtifactResult{}, errors.New("artifact storage root is unavailable")
 	}
 	root, err := filepath.EvalSymlinks(cfg.ArtifactStoragePath)
 	if err != nil {
-		return nil, errors.New("artifact storage root is unavailable")
+		return persistedArtifactResult{}, errors.New("artifact storage root is unavailable")
 	}
 	directory := filepath.Join(root, releaseID)
 	if err := os.MkdirAll(directory, 0750); err != nil {
-		return nil, errors.New("artifact storage directory is unavailable")
+		return persistedArtifactResult{}, errors.New("artifact storage directory is unavailable")
 	}
 	if info, err := os.Lstat(directory); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("artifact storage directory is not a real directory")
+		return persistedArtifactResult{}, errors.New("artifact storage directory is not a real directory")
+	}
+	// Persist the release directory entry before PostgreSQL can reference a
+	// file below it. The runtime is Linux-only, where directory fsync provides
+	// the required crash-durability boundary for mkdir/rename operations.
+	if err := syncDirectory(root); err != nil {
+		return persistedArtifactResult{}, errors.New("artifact storage directory could not be synchronized")
 	}
 	ext := ".tar"
 	if strings.HasSuffix(strings.ToLower(filename), ".tar.gz") {
@@ -553,56 +638,73 @@ func (s *Server) persistArtifact(r *http.Request, releaseID, filename, mediaType
 	target := filepath.Join(directory, id+ext)
 	relativePath, err := artifactRelativePath(releaseID, id, ext)
 	if err != nil {
-		return nil, err
+		return persistedArtifactResult{}, err
 	}
-	partialToken, err := secure.RandomToken(12)
+	partialToken, err := secure.RandomToken(16)
 	if err != nil {
-		return nil, errors.New("artifact staging name could not be created")
+		return persistedArtifactResult{}, errors.New("artifact staging name could not be created")
 	}
 	partial := target + ".partial-" + partialToken
-	committed := false
+	preserved := false
 	renamed := false
 	defer func() {
-		_ = os.Remove(partial)
-		if renamed && !committed {
-			_ = os.Remove(target)
+		if err := os.Remove(partial); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.log.Warn("could not remove partial artifact", "path", partial, "error", err)
+		}
+		if !preserved {
+			if renamed {
+				if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+					s.log.Warn("could not remove uncommitted artifact", "path", target, "error", err)
+				}
+			}
+			if err := os.Remove(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
+				s.log.Warn("could not remove empty artifact directory", "path", directory, "error", err)
+			}
 		}
 	}()
 	output, err := os.OpenFile(partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0640)
 	if err != nil {
-		return nil, errors.New("artifact storage file could not be created")
+		return persistedArtifactResult{}, errors.New("artifact storage file could not be created")
 	}
 	hash := sha256.New()
 	size, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(file, cfg.ArtifactMaxBytes+1))
+	syncErr := output.Sync()
 	closeErr := output.Close()
-	if copyErr != nil || closeErr != nil || size > cfg.ArtifactMaxBytes {
-		return nil, errors.New("artifact exceeds the configured limit or could not be written")
+	if copyErr != nil || syncErr != nil || closeErr != nil || size > cfg.ArtifactMaxBytes {
+		return persistedArtifactResult{}, errors.New("artifact exceeds the configured limit or could not be written")
 	}
 	if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
-		return nil, errors.New("artifact storage target already exists or cannot be checked")
+		return persistedArtifactResult{}, errors.New("artifact storage target already exists or cannot be checked")
 	}
 	if err := os.Rename(partial, target); err != nil {
-		return nil, errors.New("artifact could not be atomically committed to storage")
+		return persistedArtifactResult{}, errors.New("artifact could not be atomically committed to storage")
 	}
 	renamed = true
+	if err := syncDirectory(directory); err != nil {
+		return persistedArtifactResult{}, errors.New("artifact storage file could not be synchronized")
+	}
 	checksum := hex.EncodeToString(hash.Sum(nil))
 	p, _ := principalFrom(r)
 	if _, err := tx.Exec(r.Context(), `DELETE FROM release_artifacts WHERE release_id=$1 AND storage_path=''`, releaseID); err != nil {
-		return nil, errors.New("stale artifact metadata could not be removed")
+		return persistedArtifactResult{}, errors.New("stale artifact metadata could not be removed")
 	}
 	if _, err := tx.Exec(r.Context(), `INSERT INTO release_artifacts(id,release_id,original_filename,storage_path,media_type,size_bytes,sha256,uploaded_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8)`, id, releaseID, filename, relativePath, mediaType, size, checksum, p.UserID); err != nil {
-		return nil, errors.New("release not found or cannot accept artifacts")
+		return persistedArtifactResult{}, errors.New("release not found or cannot accept artifacts")
 	}
 	tag, err := tx.Exec(r.Context(), `UPDATE releases SET status='UPLOADED',updated_at=now() WHERE id=$1 AND status IN ('DRAFT','UPLOADED','REJECTED')`, releaseID)
 	if err != nil || tag.RowsAffected() == 0 {
-		return nil, errors.New("artifact metadata could not be committed")
+		return persistedArtifactResult{}, errors.New("artifact metadata could not be committed")
 	}
-	if err = tx.Commit(r.Context()); err != nil {
-		return nil, errors.New("artifact metadata could not be committed")
+	preserved = true
+	cleanup := func() {
+		if err := os.Remove(target); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.log.Warn("could not remove rolled-back artifact", "path", target, "error", err)
+		}
+		if err := os.Remove(directory); err != nil && !errors.Is(err, os.ErrNotExist) {
+			s.log.Warn("could not remove rolled-back artifact directory", "path", directory, "error", err)
+		}
 	}
-	committed = true
-	s.store.Audit(r.Context(), p.UserID, "artifact.upload", "artifact", id, "success", remoteIP(r), r.UserAgent(), nil)
-	return map[string]any{"id": id, "filename": filename, "mediaType": mediaType, "sizeBytes": size, "sha256": checksum, "contentUploaded": true}, nil
+	return persistedArtifactResult{id: id, item: map[string]any{"id": id, "filename": filename, "mediaType": mediaType, "sizeBytes": size, "sha256": checksum, "contentUploaded": true}, cleanup: cleanup}, nil
 }
 
 func removeStoredArtifact(root, relative string) error {
@@ -678,6 +780,40 @@ func matchingRunnerAvailable(ctx context.Context, queryer dependencyQueryer, req
 		  AND last_heartbeat_at >= clock_timestamp() - interval '60 seconds'
 		  AND $1::text[] <@ labels)`, requiredLabels).Scan(&ready)
 	return ready, err
+}
+
+func activeTargetJobExists(ctx context.Context, queryer dependencyQueryer, lockKey string) (bool, error) {
+	var exists bool
+	err := queryer.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM release_jobs WHERE lock_key=$1 AND status NOT IN ('SUCCESS','FAILED','ROLLED_BACK'))`, lockKey).Scan(&exists)
+	return exists, err
+}
+
+// lockReleaseTargetForJob serializes every server-side job producer for one
+// immutable application/environment target. The matching migration trigger
+// applies the same lock to direct/future release_jobs inserts before older
+// validation triggers touch deployment_heads. READ COMMITTED transactions are
+// required so the row-locking query observes a job committed while a large
+// Quick artifact was being copied; a concurrently held advisory lock is treated
+// as an immediate target conflict.
+func lockReleaseTargetForJob(ctx context.Context, tx pgx.Tx, lockKey string) (bool, error) {
+	var targetLockAcquired bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock(hashtextextended(lower($1::text), 20260827))`, lockKey).Scan(&targetLockAcquired); err != nil {
+		return false, err
+	}
+	if !targetLockAcquired {
+		return true, nil
+	}
+	var activeJobID string
+	err := tx.QueryRow(ctx, `SELECT id::text
+		FROM release_jobs
+		WHERE lower(lock_key)=lower($1) AND status NOT IN ('SUCCESS','FAILED','ROLLED_BACK')
+		ORDER BY created_at,id
+		LIMIT 1
+		FOR UPDATE`, lockKey).Scan(&activeJobID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func loadTargetCredentialSnapshot(ctx context.Context, tx pgx.Tx, profileID string) (*string, *int, error) {
@@ -790,6 +926,11 @@ func retryRequested(r *http.Request) bool {
 	return retry
 }
 
+func isSerializationFailure(err error) bool {
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError) && (postgresError.Code == "40001" || postgresError.Code == "40P01")
+}
+
 func (s *Server) retryRelease(w http.ResponseWriter, r *http.Request) {
 	s.enqueueRelease(w, r.WithContext(context.WithValue(r.Context(), retryContextKey{}, true)))
 }
@@ -803,17 +944,17 @@ func (s *Server) enqueueRelease(w http.ResponseWriter, r *http.Request) {
 		s.rollbackRelease(w, r)
 		return
 	}
-	tx, err := s.store.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := s.store.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeError(w, 500, "database_error", "could not submit release")
 		return
 	}
 	defer tx.Rollback(r.Context())
-	var status, app, version, env, appID, envID, profileID, artifactID, path, checksum string
-	var persistedRetrySourceJobID *string
+	var status, app, version, env, appID, envID, profileID, artifactID, path, checksum, releaseCreatorID string
+	var persistedRetrySourceJobID, quickBaseReleaseID, quickBaseJobID *string
 	var runnerLabels []string
-	var profileMatches, targetActive, required bool
-	err = tx.QueryRow(r.Context(), `SELECT r.status,a.code,r.version,e.code,r.application_id::text,r.environment_id::text,r.profile_id::text,r.retry_source_job_id::text,(p.application_id=r.application_id AND p.environment_id=r.environment_id),(a.active AND e.active AND p.active AND p.enabled AND p.revoked_at IS NULL),settings.approval_enabled AND (p.approval_required OR e.protected OR upper(e.code)=ANY(regexp_split_to_array(upper(COALESCE(settings.approval_config->>'protectedEnvironments','')), '[[:space:]]*,[[:space:]]*'))),COALESCE(art.id::text,''),COALESCE(art.storage_path,''),COALESCE(art.sha256,''),p.runner_labels FROM releases r JOIN applications a ON a.id=r.application_id JOIN environments e ON e.id=r.environment_id JOIN deployment_profiles p ON p.id=r.profile_id CROSS JOIN app_settings settings LEFT JOIN LATERAL(SELECT id,storage_path,sha256 FROM release_artifacts WHERE release_id=r.id AND storage_path<>'' ORDER BY created_at DESC,id DESC LIMIT 1) art ON TRUE WHERE r.id=$1 FOR UPDATE OF r`, id).Scan(&status, &app, &version, &env, &appID, &envID, &profileID, &persistedRetrySourceJobID, &profileMatches, &targetActive, &required, &artifactID, &path, &checksum, &runnerLabels)
+	var profileMatches, targetActive, required, quickRelease bool
+	err = tx.QueryRow(r.Context(), `SELECT r.status,a.code,r.version,e.code,r.application_id::text,r.environment_id::text,r.profile_id::text,r.retry_source_job_id::text,r.created_by,r.quick_release,r.quick_base_release_id::text,r.quick_base_job_id::text,(p.application_id=r.application_id AND p.environment_id=r.environment_id),(a.active AND e.active AND p.active AND p.enabled AND p.revoked_at IS NULL),settings.approval_enabled AND (p.approval_required OR e.protected OR upper(e.code)=ANY(regexp_split_to_array(upper(COALESCE(settings.approval_config->>'protectedEnvironments','')), '[[:space:]]*,[[:space:]]*'))),COALESCE(art.id::text,''),COALESCE(art.storage_path,''),COALESCE(art.sha256,''),p.runner_labels FROM releases r JOIN applications a ON a.id=r.application_id JOIN environments e ON e.id=r.environment_id JOIN deployment_profiles p ON p.id=r.profile_id CROSS JOIN app_settings settings LEFT JOIN LATERAL(SELECT id,storage_path,sha256 FROM release_artifacts WHERE release_id=r.id AND storage_path<>'' ORDER BY created_at DESC,id DESC LIMIT 1) art ON TRUE WHERE r.id=$1 FOR UPDATE OF r`, id).Scan(&status, &app, &version, &env, &appID, &envID, &profileID, &persistedRetrySourceJobID, &releaseCreatorID, &quickRelease, &quickBaseReleaseID, &quickBaseJobID, &profileMatches, &targetActive, &required, &artifactID, &path, &checksum, &runnerLabels)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "not_found", "release not found")
 		return
@@ -901,6 +1042,15 @@ func (s *Server) enqueueRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database_error", "release target identifiers are invalid")
 		return
 	}
+	targetBusy, busyErr := lockReleaseTargetForJob(r.Context(), tx, lockKey)
+	if busyErr != nil {
+		writeError(w, http.StatusInternalServerError, "database_error", "could not validate the deployment target lock")
+		return
+	}
+	if targetBusy {
+		writeError(w, http.StatusConflict, "job_conflict", "release target already has an active deployment job")
+		return
+	}
 	targetCredentialID, targetCredentialVersion, credentialErr := loadTargetCredentialSnapshot(r.Context(), tx, profileID)
 	if credentialErr != nil {
 		writeError(w, http.StatusConflict, "target_credential_not_ready", credentialErr.Error())
@@ -915,8 +1065,17 @@ func (s *Server) enqueueRelease(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "database_error", "could not snapshot the current deployment head")
 		return
 	}
+	if quickRelease && (!sameNullableString(quickBaseReleaseID, priorHeadID) || !sameNullableString(quickBaseJobID, priorHeadJobID)) {
+		writeError(w, http.StatusConflict, "deployment_head_changed", "the deployed version changed after preflight; create a new quick release")
+		return
+	}
+	jobCreatorID := p.UserID
+	if quickRelease {
+		jobCreatorID = releaseCreatorID
+		priorHeadID, priorHeadJobID = quickBaseReleaseID, quickBaseJobID
+	}
 	jobID, _ := secure.NewID()
-	_, err = tx.Exec(r.Context(), `INSERT INTO release_jobs(id,release_id,profile_id,application,version,environment,lock_key,artifact_id,artifact_path,expected_sha256,rollback_source_release_id,rollback_source_job_id,retry_of_job_id,target_credential_id,target_credential_version,runner_labels,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, jobID, id, profileID, app, version, env, lockKey, artifactID, path, checksum, priorHeadID, priorHeadJobID, retrySourceJobID, targetCredentialID, targetCredentialVersion, runnerLabels, p.UserID)
+	_, err = tx.Exec(r.Context(), `INSERT INTO release_jobs(id,release_id,profile_id,application,version,environment,lock_key,artifact_id,artifact_path,expected_sha256,rollback_source_release_id,rollback_source_job_id,retry_of_job_id,target_credential_id,target_credential_version,runner_labels,created_by) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`, jobID, id, profileID, app, version, env, lockKey, artifactID, path, checksum, priorHeadID, priorHeadJobID, retrySourceJobID, targetCredentialID, targetCredentialVersion, runnerLabels, jobCreatorID)
 	if err == nil {
 		_, err = tx.Exec(r.Context(), `UPDATE releases SET status='QUEUED',retry_source_job_id=NULL,updated_at=now() WHERE id=$1`, id)
 	}
@@ -958,7 +1117,7 @@ func (s *Server) decision(w http.ResponseWriter, r *http.Request, newStatus, act
 		return
 	}
 	id := r.PathValue("id")
-	tx, err := s.store.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := s.store.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeError(w, 500, "database_error", "could not update approval")
 		return
@@ -966,19 +1125,23 @@ func (s *Server) decision(w http.ResponseWriter, r *http.Request, newStatus, act
 	defer tx.Rollback(r.Context()) //nolint:errcheck
 	var currentStatus, creator, profileID, requestedOperation string
 	var rollbackSourceID, rollbackSourceJobID, retrySourceJobID, operationBaseStatus *string
-	var required, allowSelf, requireRejectComment, profileMatches bool
+	var required, allowSelf, requireRejectComment, profileMatches, quickRelease, autoDeployAfterApproval bool
 	err = tx.QueryRow(r.Context(), `SELECT r.status,COALESCE(r.operation_requested_by,r.created_by),r.profile_id::text,r.requested_operation,r.rollback_source_release_id::text,r.rollback_source_job_id::text,r.retry_source_job_id::text,r.operation_base_status,
 		(r.status IN ('PENDING_REVIEW','UNDER_REVIEW') OR (settings.approval_enabled AND (p.approval_required OR e.protected OR upper(e.code)=ANY(regexp_split_to_array(upper(COALESCE(settings.approval_config->>'protectedEnvironments','')), '[[:space:]]*,[[:space:]]*'))))),
 		COALESCE((settings.approval_config->>'allowSelfApproval')::boolean,FALSE),
 		COALESCE((settings.approval_config->>'requireRejectComment')::boolean,TRUE),
-		(p.application_id=r.application_id AND p.environment_id=r.environment_id)
+		(p.application_id=r.application_id AND p.environment_id=r.environment_id),r.quick_release,r.auto_deploy_after_approval
 		FROM releases r JOIN deployment_profiles p ON p.id=r.profile_id JOIN environments e ON e.id=r.environment_id CROSS JOIN app_settings settings
-		WHERE r.id=$1 FOR UPDATE OF r`, id).Scan(&currentStatus, &creator, &profileID, &requestedOperation, &rollbackSourceID, &rollbackSourceJobID, &retrySourceJobID, &operationBaseStatus, &required, &allowSelf, &requireRejectComment, &profileMatches)
+		WHERE r.id=$1 FOR UPDATE OF r`, id).Scan(&currentStatus, &creator, &profileID, &requestedOperation, &rollbackSourceID, &rollbackSourceJobID, &retrySourceJobID, &operationBaseStatus, &required, &allowSelf, &requireRejectComment, &profileMatches, &quickRelease, &autoDeployAfterApproval)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, 404, "not_found", "release not found")
 		return
 	}
 	if err != nil {
+		if isSerializationFailure(err) {
+			writeError(w, http.StatusConflict, "approval_conflict", "approval was already handled by another request")
+			return
+		}
 		writeError(w, 500, "database_error", "could not validate approval")
 		return
 	}
@@ -1045,6 +1208,25 @@ func (s *Server) decision(w http.ResponseWriter, r *http.Request, newStatus, act
 		writeError(w, 409, "invalid_state", "release is not in an allowed approval state")
 		return
 	}
+	if newStatus == "APPROVED" && quickRelease && autoDeployAfterApproval && requestedOperation == "DEPLOY" && retrySourceJobID == nil {
+		tag, updateErr := tx.Exec(r.Context(), `UPDATE releases SET status='APPROVED',approved_by=$2,decision_note=$3,updated_at=now() WHERE id=$1 AND status=ANY($4)`, id, p.UserID, input.Comment, allowed)
+		if updateErr != nil || tag.RowsAffected() == 0 {
+			writeError(w, http.StatusConflict, "approval_conflict", "approval could not be applied because deployment inputs changed")
+			return
+		}
+		if _, queueErr := s.queueQuickDeployTx(r.Context(), tx, id, "APPROVED"); queueErr != nil {
+			writeQuickQueueError(w, queueErr, "database_error", "approved quick release could not be queued")
+			return
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			writeError(w, http.StatusConflict, "approval_conflict", "approval and automatic deployment conflicted with another request")
+			return
+		}
+		s.store.Audit(r.Context(), p.UserID, action, "release", id, "success", remoteIP(r), r.UserAgent(), nil)
+		s.store.Audit(r.Context(), p.UserID, "release.enqueue.auto", "release", id, "success", remoteIP(r), r.UserAgent(), nil)
+		s.getReleaseByID(w, r, id, http.StatusOK)
+		return
+	}
 	targetStatus := newStatus
 	clearRollbackRequest := newStatus == "REJECTED" && requestedOperation == "ROLLBACK"
 	clearRetryRequest := newStatus == "REJECTED" && retrySourceJobID != nil
@@ -1084,7 +1266,7 @@ func (s *Server) rollbackRelease(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	p, _ := principalFrom(r)
 	retry := retryRequested(r)
-	tx, err := s.store.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.Serializable})
+	tx, err := s.store.Pool.BeginTx(r.Context(), pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		writeError(w, 500, "database_error", "could not prepare rollback")
 		return
@@ -1120,6 +1302,20 @@ func (s *Server) rollbackRelease(w http.ResponseWriter, r *http.Request) {
 	isExistingRequest := requestedOperation == "ROLLBACK" && (currentStatus == "PENDING_REVIEW" || currentStatus == "UNDER_REVIEW" || currentStatus == "APPROVED")
 	if !isTerminalRequest && !isExistingRequest {
 		writeError(w, 409, "invalid_state", "release is not ready for rollback")
+		return
+	}
+	lockKey, lockKeyErr := releaseTargetLockKey(appID, envID)
+	if lockKeyErr != nil {
+		writeError(w, 500, "database_error", "release target identifiers are invalid")
+		return
+	}
+	targetBusy, busyErr := lockReleaseTargetForJob(r.Context(), tx, lockKey)
+	if busyErr != nil {
+		writeError(w, http.StatusInternalServerError, "database_error", "could not lock the deployment target")
+		return
+	}
+	if targetBusy {
+		writeError(w, http.StatusConflict, "job_conflict", "release target already has an active deployment job")
 		return
 	}
 	// Existing approval requests may have originated from an explicit retry
@@ -1205,11 +1401,6 @@ func (s *Server) rollbackRelease(w http.ResponseWriter, r *http.Request) {
 	}
 	if !runnerReady {
 		writeError(w, http.StatusConflict, "runner_unavailable", "no active online runner matches the rollback profile labels")
-		return
-	}
-	lockKey, err := releaseTargetLockKey(appID, envID)
-	if err != nil {
-		writeError(w, 500, "database_error", "release target identifiers are invalid")
 		return
 	}
 	baseStatus := currentStatus

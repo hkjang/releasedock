@@ -56,8 +56,9 @@ interface FieldConfig {
   helperText?: string;
   defaultValue?: unknown;
   options?: Array<{ label: string; value: string }>;
-  relation?: 'applications' | 'environments' | 'registries' | 'scripts' | 'targetCredentials';
+  relation?: 'applications' | 'environments' | 'profiles' | 'registries' | 'scripts' | 'targetCredentials';
   scriptType?: 'PRE_CHECK' | 'DEPLOY' | 'HEALTH_CHECK' | 'ROLLBACK';
+  pattern?: RegExp;
 }
 
 interface ColumnConfig {
@@ -98,6 +99,12 @@ export const resourceConfigs = {
     writePermission: 'profiles.write',
     columns: [{ key: 'name', label: '이름' }, { key: 'applicationId', label: '애플리케이션 ID' }, { key: 'environmentId', label: '환경 ID' }, { key: 'runnerLabels', label: 'Runner 레이블' }, { key: 'runtimeKind', label: 'Runtime' }, { key: 'registryHost', label: 'Registry' }, { key: 'approvalRequired', label: '승인', status: true }, { key: 'active', label: '상태', status: true }],
     fields: [{ key: 'name', label: '이름', required: true }, { key: 'applicationId', label: '애플리케이션', required: true, relation: 'applications' }, { key: 'environmentId', label: '환경', required: true, relation: 'environments' }, { key: 'description', label: '설명', type: 'multiline' }, { key: 'runnerLabels', label: '필수 Runner 레이블', helperText: '쉼표로 구분합니다. 예: prod,docker. 비우면 모든 활성 Runner가 대상입니다.' }, { key: 'registryId', label: 'Harbor Registry', relation: 'registries' }, { key: 'preScriptId', label: 'Pre-check Script', relation: 'scripts', scriptType: 'PRE_CHECK' }, { key: 'deployScriptId', label: 'Deploy Script', relation: 'scripts', scriptType: 'DEPLOY' }, { key: 'healthScriptId', label: 'Health-check Script', relation: 'scripts', scriptType: 'HEALTH_CHECK' }, { key: 'rollbackScriptId', label: 'Rollback Script', relation: 'scripts', scriptType: 'ROLLBACK' }, { key: 'runtimeKind', label: 'Container Runtime', type: 'select', required: true, defaultValue: 'docker', options: [{ label: 'Docker', value: 'docker' }, { label: 'Podman', value: 'podman' }, { label: 'containerd', value: 'containerd' }] }, { key: 'runtimeBinaryPath', label: 'Runtime 실행 파일', defaultValue: '/usr/bin/docker', helperText: '선택한 Runtime과 이름이 일치하는 /usr/bin, /usr/local/bin, /usr/sbin, /usr/local/sbin 경로만 허용됩니다.' }, { key: 'containerdNamespace', label: 'containerd Namespace', defaultValue: 'default' }, { key: 'registryUrl', label: 'Harbor Registry URL', helperText: 'Credential을 선택하면 자동 반영됩니다.' }, { key: 'registryHost', label: 'Registry Host' }, { key: 'registryProject', label: 'Registry Project' }, { key: 'registryInsecure', label: 'Registry TLS 검증 생략', type: 'boolean', defaultValue: false }, { key: 'registryCaPem', label: 'Registry CA PEM', type: 'multiline', helperText: '사설 CA의 PEM 인증서를 입력합니다. Docker는 데몬 신뢰 저장소에도 동일한 CA가 필요합니다.' }, { key: 'healthChecks', label: 'Health Check JSON', type: 'multiline', defaultValue: '[]' }, { key: 'maxArchiveBytes', label: '최대 아티팩트 크기(byte)', type: 'number', required: true, defaultValue: 10737418240, helperText: '압축 파일 자체의 최대 크기입니다. 기본 10 GiB.' }, { key: 'maxExtractedBytes', label: '최대 압축 해제 크기(byte)', type: 'number', required: true, defaultValue: 21474836480, helperText: '압축 풀기 후 모든 파일의 합계 상한입니다. 기본 20 GiB.' }, { key: 'maxArchiveFiles', label: '최대 파일 수', type: 'number', required: true, defaultValue: 10000 }, { key: 'maxImages', label: '최대 컨테이너 이미지 수', type: 'number', required: true, defaultValue: 100 }, { key: 'maxLogBytes', label: '작업별 최대 로그 크기(byte)', type: 'number', required: true, defaultValue: 52428800, helperText: '단계별 로그 저장 상한입니다. 기본 50 MiB.' }, { key: 'allowSymlinks', label: '아티팩트 심볼릭 링크 허용', type: 'boolean', defaultValue: false, helperText: '보안을 위해 기본적으로 비활성화합니다.' }, { key: 'timeoutSeconds', label: '실행 제한 시간(초)', type: 'number', required: true, defaultValue: 600 }, { key: 'approvalRequired', label: '승인 필요', type: 'boolean', defaultValue: false }, { key: 'cleanupWorkspace', label: '성공 후 작업공간 정리', type: 'boolean', defaultValue: true }, { key: 'keepFailedWorkspace', label: '실패 작업공간 보존', type: 'boolean', defaultValue: false }, { key: 'active', label: '활성화', type: 'boolean', defaultValue: true }],
+  },
+  presets: {
+    title: '배포 프리셋', description: '파일명 접두어를 서비스와 배포 정책에 연결해 일반 사용자의 원클릭 배포를 구성합니다.', singular: '배포 프리셋', endpoint: '/admin/deployment-presets',
+    writePermission: 'admin.presets.write',
+    columns: [{ key: 'name', label: '서비스' }, { key: 'artifactPrefix', label: '파일명 접두어' }, { key: 'applicationName', label: '애플리케이션' }, { key: 'environmentName', label: '배포 대상' }, { key: 'deploymentProfileName', label: '운영 정책' }, { key: 'autoDeployAfterApproval', label: '승인 후 자동 시작', status: true }, { key: 'active', label: '상태', status: true }],
+    fields: [{ key: 'name', label: '사용자 표시 이름', required: true, helperText: '예: AI Portal 운영' }, { key: 'artifactPrefix', label: '파일명 접두어', required: true, pattern: /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/, helperText: '1~64자의 영문 소문자·숫자·내부 하이픈만 사용합니다. 예: ai-portal' }, { key: 'applicationId', label: '애플리케이션', required: true, relation: 'applications' }, { key: 'environmentId', label: '배포 대상', required: true, relation: 'environments' }, { key: 'deploymentProfileId', label: '운영 정책', required: true, relation: 'profiles', helperText: '선택한 서비스와 배포 대상에 맞는 정책만 표시됩니다.' }, { key: 'autoDeployAfterApproval', label: '승인 후 자동으로 배포 시작', type: 'boolean', defaultValue: true }, { key: 'active', label: '활성화', type: 'boolean', defaultValue: true }],
   },
   scripts: {
     title: '스크립트 템플릿', description: 'Runner에서 허용 목록으로 실행할 버전 관리 스크립트를 관리합니다.', singular: '스크립트', endpoint: '/admin/scripts',
@@ -174,14 +181,15 @@ export async function loadRelations(config: ResourceConfig, access: RelationAcce
     }
     return rows;
   };
-  const [applications, environments, registries, scripts, targetCredentials] = await Promise.all([
+  const [applications, environments, profiles, registries, scripts, targetCredentials] = await Promise.all([
     load('applications', '/applications'),
     load('environments', '/environments'),
+    load('profiles', '/deployment-profiles'),
     load('registries', '/admin/registries'),
     load('scripts', '/admin/scripts'),
     load('targetCredentials', '/admin/target-credentials'),
   ]);
-  return { applications, environments, registries, scripts, targetCredentials };
+  return { applications, environments, profiles, registries, scripts, targetCredentials };
 }
 
 export function buildResourcePayload(config: ResourceConfig, values: Record<string, unknown>, editing: boolean, canWriteTargetCredentialBinding: boolean) {
@@ -203,6 +211,7 @@ function ResourceDialog({ config, row, open, onClose, onSaved }: { config: Resou
   const relationAccess = useMemo<RelationAccess>(() => ({
     applications: hasPermission('applications.read'),
     environments: hasPermission('applications.read'),
+    profiles: hasPermission('profiles.read'),
     registries: hasPermission('admin.registries.read'),
     scripts: hasPermission('admin.scripts.read'),
     targetCredentials: hasPermission('admin.credentials.read'),
@@ -217,17 +226,23 @@ function ResourceDialog({ config, row, open, onClose, onSaved }: { config: Resou
   const setValue = (key: string, value: unknown) => setValues((current) => ({
     ...current,
     [key]: value,
-    ...(key === 'applicationId' ? { environmentId: '' } : {}),
+    ...(key === 'applicationId' ? { environmentId: '', deploymentProfileId: '' } : {}),
+    ...(key === 'environmentId' ? { deploymentProfileId: '' } : {}),
     ...(key === 'runtimeKind' ? { runtimeBinaryPath: { docker: '/usr/bin/docker', podman: '/usr/bin/podman', containerd: '/usr/bin/ctr' }[String(value)] ?? '' } : {}),
   }));
   const activeFields = config.fields.filter((field) => !row || !field.createOnly);
   const targetCredentialField: FieldConfig = { key: 'targetCredentialId', label: '배포 대상 Credential', relation: 'targetCredentials' };
-  const valid = activeFields.every((field) => (!field.required && !(!row && field.requiredOnCreate)) || field.type === 'boolean' || String(values[field.key] ?? '').trim());
+  const valid = activeFields.every((field) => {
+    const value = String(values[field.key] ?? '').trim();
+    const required = field.required || (!row && field.requiredOnCreate);
+    return (!required || field.type === 'boolean' || value) && (!field.pattern || !value || field.pattern.test(value));
+  });
 
   const relationOptions = (field: FieldConfig): Array<{ label: string; value: string }> => {
     if (!field.relation) return field.options ?? [];
     let rows = relations.data?.[field.relation] ?? [];
     if (field.relation === 'environments' && values.applicationId) rows = rows.filter((item) => !item.applicationId || item.applicationId === values.applicationId);
+    if (field.relation === 'profiles') rows = rows.filter((item) => (!values.applicationId || !item.applicationId || item.applicationId === values.applicationId) && (!values.environmentId || !item.environmentId || item.environmentId === values.environmentId));
     if (field.relation === 'scripts' && field.scriptType) rows = rows.filter((item) => item.type === field.scriptType && item.active !== false && item.approved !== false);
     const options = rows.map((item) => ({
       value: item.id,
@@ -282,8 +297,9 @@ function ResourceDialog({ config, row, open, onClose, onSaved }: { config: Resou
               value={field.type === 'multiline' && values[field.key] && typeof values[field.key] === 'object' ? JSON.stringify(values[field.key], null, 2) : Array.isArray(values[field.key]) ? (values[field.key] as unknown[]).join(', ') : values[field.key] ?? ''}
               onChange={(event) => setValue(field.key, event.target.value)}
               helperText={field.relation && relations.error ? `선택 목록을 불러오지 못했습니다: ${relations.error.message}` : field.helperText}
-              disabled={Boolean(field.relation && (relations.loading || (field.relation === 'environments' && !values.applicationId)))}
-              inputProps={field.type === 'number' ? { min: 0 } : undefined}
+              error={Boolean(field.pattern && String(values[field.key] ?? '') && !field.pattern.test(String(values[field.key])))}
+              disabled={Boolean(field.relation && (relations.loading || (field.relation === 'environments' && !values.applicationId) || (field.relation === 'profiles' && (!values.applicationId || !values.environmentId))))}
+              inputProps={{ ...(field.type === 'number' ? { min: 0 } : {}), ...(field.pattern ? { pattern: field.pattern.source } : {}), ...(field.key === 'artifactPrefix' ? { maxLength: 64 } : {}) }}
               slotProps={field.type === 'secret-multiline' ? { input: { endAdornment: <InputAdornment position="end"><IconButton aria-label={showSecret ? 'Secret 숨기기' : 'Secret 보기'} onClick={() => setShowSecret((current) => !current)} edge="end">{showSecret ? <VisibilityOffRoundedIcon /> : <VisibilityRoundedIcon />}</IconButton></InputAdornment> } } : undefined}
               sx={field.type === 'secret-multiline' && !showSecret ? { '& textarea': { color: 'transparent', caretColor: 'text.primary' } } : undefined}
               fullWidth

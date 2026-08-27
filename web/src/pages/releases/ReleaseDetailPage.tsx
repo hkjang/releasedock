@@ -37,7 +37,7 @@ import { api } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { PageError, PageLoading } from '../../components/Feedback';
 import { PageHeader } from '../../components/PageHeader';
-import { StatusChip } from '../../components/StatusChip';
+import { SimpleReleaseStatusChip, StatusChip } from '../../components/StatusChip';
 import { useAsync } from '../../hooks/useAsync';
 import type { Release, ReleaseStep, StepStatus } from '../../types/domain';
 import { formatBytes, formatDate, formatDuration } from '../../utils/format';
@@ -305,6 +305,7 @@ function LogPanel({ releaseId, enabled }: { releaseId: string; enabled: boolean 
 }
 
 export function ReleaseDetailPage() {
+  const { hasPermission } = useAuth();
   const { id } = useParams<{ id: string }>();
   const state = useAsync(() => id ? api.release(id) : Promise.reject(new Error('릴리즈 ID가 없습니다.')), [id]);
   const [tab, setTab] = useState(0);
@@ -372,12 +373,12 @@ export function ReleaseDetailPage() {
             <Card>
               <CardContent sx={{ p: 3 }}>
                 <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 2.5 }}>
-                  <Typography variant="h3">현재 상태</Typography><StatusChip status={release.status} size="medium" />
+                  <Typography variant="h3">현재 상태</Typography><SimpleReleaseStatusChip status={release.status} size="medium" />
                 </Stack>
                 <Stack spacing={2}>
                   <DetailField label="애플리케이션" value={release.applicationName || release.applicationId} />
                   <DetailField label="배포 환경" value={release.environmentName || release.environmentId} />
-                  <DetailField label="배포 프로필" value={release.deploymentProfileName || release.deploymentProfileId} />
+                  {hasPermission('profiles.read') && <DetailField label="배포 프로필" value={release.deploymentProfileName || release.deploymentProfileId} />}
                   <DetailField label="요청 작업" value={release.requestedOperation === 'ROLLBACK' ? '롤백' : '배포'} />
                   {release.requestedOperation === 'ROLLBACK' && <DetailField label="롤백 대상 버전" value={release.rollbackSourceVersion || release.rollbackSourceReleaseId} />}
                   <DetailField label="등록 시각" value={formatDate(release.createdAt)} />

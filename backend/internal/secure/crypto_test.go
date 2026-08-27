@@ -1,7 +1,9 @@
 package secure
 
 import (
+	"encoding/base64"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -22,7 +24,13 @@ func TestVaultRoundTripAndContextBinding(t *testing.T) {
 	if _, err := vault.Decrypt(ciphertext, "oidc.client_secret"); err == nil {
 		t.Fatal("ciphertext must be bound to its setting context")
 	}
-	tampered := ciphertext[:len(ciphertext)-1] + "A"
+	parts := strings.SplitN(ciphertext, ":", 2)
+	payload, err := base64.RawStdEncoding.DecodeString(parts[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload[len(payload)-1] ^= 1
+	tampered := parts[0] + ":" + base64.RawStdEncoding.EncodeToString(payload)
 	if _, err := vault.Decrypt(tampered, "ai.api_key"); err == nil {
 		t.Fatal("tampered ciphertext was accepted")
 	}

@@ -191,6 +191,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/admin/runners", s.withPermission("admin.runners.write", s.createRunner))
 	mux.HandleFunc("PUT /api/v1/admin/runners/{id}", s.withPermission("admin.runners.write", s.updateRunner))
 	mux.HandleFunc("DELETE /api/v1/admin/runners/{id}", s.withPermission("admin.runners.write", s.deleteRunner))
+	mux.HandleFunc("GET /api/v1/admin/deployment-presets", s.withPermission("admin.presets.read", s.listDeploymentPresets))
+	mux.HandleFunc("POST /api/v1/admin/deployment-presets", s.withPermission("admin.presets.write", s.createDeploymentPreset))
+	mux.HandleFunc("GET /api/v1/admin/deployment-presets/{id}", s.withPermission("admin.presets.read", s.getDeploymentPreset))
+	mux.HandleFunc("PATCH /api/v1/admin/deployment-presets/{id}", s.withPermission("admin.presets.write", s.updateDeploymentPreset))
+	mux.HandleFunc("PUT /api/v1/admin/deployment-presets/{id}", s.withPermission("admin.presets.write", s.updateDeploymentPreset))
+	mux.HandleFunc("DELETE /api/v1/admin/deployment-presets/{id}", s.withPermission("admin.presets.write", s.deleteDeploymentPreset))
 	mux.HandleFunc("POST /api/v1/runner/heartbeat", s.runnerHeartbeat)
 
 	mux.HandleFunc("GET /api/v1/applications", s.withPermission("applications.read", s.listApplications))
@@ -222,6 +228,8 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/v1/releases", s.withPermission("releases.read", s.listReleases))
 	mux.HandleFunc("POST /api/v1/releases", s.withPermission("releases.create", s.createRelease))
+	mux.HandleFunc("POST /api/v1/releases/preflight", s.withPermission("releases.create", s.preflightQuickRelease))
+	mux.HandleFunc("POST /api/v1/releases/quick", s.withPermission("releases.create", s.quickRelease))
 	mux.HandleFunc("GET /api/v1/releases/{id}", s.withPermission("releases.read", s.getRelease))
 	mux.HandleFunc("PATCH /api/v1/releases/{id}", s.withPermission("releases.write", s.updateRelease))
 	mux.HandleFunc("DELETE /api/v1/releases/{id}", s.withPermission("releases.write", s.deleteRelease))

@@ -132,6 +132,56 @@ export interface DeploymentProfile {
   active?: boolean;
 }
 
+export interface DeploymentPreset {
+  id: Identifier;
+  name: string;
+  artifactPrefix: string;
+  applicationId: Identifier;
+  environmentId: Identifier;
+  deploymentProfileId: Identifier;
+  autoDeployAfterApproval: boolean;
+  active: boolean;
+  applicationName?: string;
+  environmentName?: string;
+  deploymentProfileName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface QuickReleasePreflight {
+  filename: string;
+  artifactPrefix: string;
+  version: string;
+  currentVersion?: string | null;
+  approvalRequired: boolean;
+  nextAction: 'APPROVAL' | 'DEPLOY';
+  preset: {
+    id: Identifier;
+    name: string;
+    autoDeployAfterApproval: boolean;
+    updatedAt: string;
+  };
+  application: {
+    id: Identifier;
+    code: string;
+    name: string;
+  };
+  environment: {
+    id: Identifier;
+    code: string;
+    name: string;
+    kind?: string;
+  };
+  deploymentProfile: {
+    id: Identifier;
+    name: string;
+  };
+  readiness: {
+    profileReady: boolean;
+    runnerAvailable: boolean;
+  };
+}
+
 export interface ApiKey {
   id: Identifier;
   name: string;
