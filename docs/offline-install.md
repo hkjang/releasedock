@@ -27,10 +27,10 @@ Runtime binary는 종류별 `docker`/`podman`/`ctr` 이름과 `/usr/bin`, `/usr/
 ## 반입 검증
 
 ```bash
-sha256sum -c releasedock-v0.3.2.tar.gz.sha256
-tar -tzf releasedock-v0.3.2.tar.gz
-tar -xzf releasedock-v0.3.2.tar.gz
-cd releasedock-v0.3.2
+sha256sum -c releasedock-v0.3.3.tar.gz.sha256
+tar -tzf releasedock-v0.3.3.tar.gz
+tar -xzf releasedock-v0.3.3.tar.gz
+cd releasedock-v0.3.3
 sudo ./install.sh
 ```
 
@@ -56,6 +56,53 @@ PORT=8080
 ```
 
 bootstrap password는 최초 로그인 후 변경합니다. 이후 환경 파일에서 `BOOTSTRAP_ADMIN_PASSWORD` 값을 제거하면 안 됩니다(허용 환경 변수 계약은 유지되지만 재부팅 때 사용되지는 않습니다). 운영에서는 systemd credential 또는 root-only 파일로 환경 파일 자체를 보호하십시오.
+
+## Standalone 기동 (systemd 없이)
+
+패키지에 포함된 `releasedock.sh` 로 systemd 없이 바로 띄울 수 있습니다. 평가 환경이나 심플 모드만 사용하는 설치에 적합합니다.
+
+```bash
+cd releasedock-v0.3.3
+cp releasedock.env.example releasedock.env   # 값을 채웁니다
+chmod 600 releasedock.env
+
+./releasedock.sh doctor      # 먼저 환경을 진단합니다
+./releasedock.sh start       # 기동 (server + runner)
+./releasedock.sh status      # 상태 확인
+./releasedock.sh logs server -f
+./releasedock.sh restart
+./releasedock.sh stop
+```
+
+소스 체크아웃에서는 `make build` 후 `make start` / `make stop` / `make restart` / `make status` / `make logs` / `make doctor` 를 쓸 수 있습니다.
+
+### 동작 방식
+
+- 서비스별로 `run/<service>.pid` 와 `logs/<service>.log` 를 만듭니다. 경로는 `RELEASEDOCK_RUN_DIR`, `RELEASEDOCK_LOG_DIR` 로 바꿉니다.
+- `start` 는 기동 전 필수 항목(실행 파일, POSTGRES_DSN, ENCRYPTION_KEY, PORT)을 먼저 확인하고, 프로세스가 곧바로 죽으면 로그 마지막 20줄을 보여주며 실패로 끝냅니다. 점검을 건너뛰려면 `--no-preflight` 를 씁니다.
+- 이미 실행 중이면 다시 띄우지 않습니다. systemd 로 같은 서비스가 돌고 있으면 **기동을 거부합니다.** 중복 기동은 DB 잠금과 충돌을 일으킵니다.
+- `stop` 은 SIGTERM 을 보내 최대 35초 기다린 뒤에만 SIGKILL 로 넘어갑니다. API 는 30초 graceful shutdown 을 사용합니다.
+- PID 재사용으로 엉뚱한 프로세스를 죽이지 않도록, `/proc/<pid>/exe` 가 우리 바이너리를 가리키는지 확인한 뒤에만 신호를 보냅니다.
+
+### 제약
+
+승인 스크립트를 격리 UID 로 실행하는 executor 는 **systemd socket activation 이 필요합니다.** standalone 에서는 그 socket 이 없으므로 전체 모드의 배포 스크립트 실행 단계가 실패합니다. `doctor` 가 이 상태를 경고로 알려줍니다.
+
+심플 모드는 명령을 API 프로세스가 직접 실행하므로 standalone 에서 완전히 동작합니다. 전체 릴리즈 파이프라인이 필요하면 `install.sh` 로 systemd 설치를 하십시오.
+
+### doctor 점검 항목
+
+| 구분 | 확인 내용 |
+| --- | --- |
+| 실행 파일 | server/runner/executor 존재와 실행 권한, 웹 자산 |
+| 환경 설정 | 환경 파일 권한, 필수 변수, ENCRYPTION_KEY 32바이트, PORT 범위, 예제 값이 그대로인지 |
+| 포트 | PORT 사용 여부와 점유 프로세스 |
+| 데이터 경로 | `/var/lib/releasedock` 이하 존재·심볼릭 링크·쓰기 권한, run/log 경로 |
+| PostgreSQL | 접속 가능 여부와 적용된 마이그레이션 수 (psql 또는 pg_isready 필요) |
+| 프로세스 | 실행 상태, `/healthz`, 버전 |
+| 격리 경계 | executor socket 유무, systemd unit 설치 여부, 심플 모드 실행 주체 |
+
+실패가 하나라도 있으면 종료 코드 1 을 반환하므로 설치 자동화에서 그대로 쓸 수 있습니다.
 
 ## 백업
 

@@ -26,6 +26,7 @@ install -m 0755 "${PROJECT_DIR}/dist/bin/releasedock-executor" "${STAGE_DIR}/bin
 cp -a "${PROJECT_DIR}/dist/web/." "${STAGE_DIR}/web/"
 install -m 0755 "${PROJECT_DIR}/deploy/install.sh" "${STAGE_DIR}/install.sh"
 install -m 0755 "${PROJECT_DIR}/deploy/rollback.sh" "${STAGE_DIR}/rollback.sh"
+install -m 0755 "${PROJECT_DIR}/deploy/releasedock.sh" "${STAGE_DIR}/releasedock.sh"
 install -m 0644 "${PROJECT_DIR}/deploy/releasedock.env.example" "${STAGE_DIR}/releasedock.env.example"
 install -m 0644 "${PROJECT_DIR}/deploy/releasedock-server.service" "${STAGE_DIR}/systemd/releasedock-server.service"
 install -m 0644 "${PROJECT_DIR}/deploy/releasedock-runner.service" "${STAGE_DIR}/systemd/releasedock-runner.service"
@@ -41,7 +42,8 @@ fi
 find "${STAGE_DIR}" -type d -exec chmod 0755 {} +
 find "${STAGE_DIR}" -type f -exec chmod 0644 {} +
 chmod 0755 "${STAGE_DIR}/bin/releasedock-server" "${STAGE_DIR}/bin/releasedock-runner" \
-	"${STAGE_DIR}/bin/releasedock-executor" "${STAGE_DIR}/install.sh" "${STAGE_DIR}/rollback.sh"
+	"${STAGE_DIR}/bin/releasedock-executor" "${STAGE_DIR}/install.sh" "${STAGE_DIR}/rollback.sh" \
+	"${STAGE_DIR}/releasedock.sh"
 
 (
   cd "${STAGE_DIR}"

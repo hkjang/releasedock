@@ -28,6 +28,7 @@ describe('deployment profile credential permissions', () => {
       registries: false,
       scripts: false,
       targetCredentials: false,
+      roles: false,
     });
 
     expect(getResource.mock.calls.map(([path]) => path)).toEqual(['/applications', '/environments']);
@@ -43,6 +44,7 @@ describe('deployment profile credential permissions', () => {
       registries: true,
       scripts: true,
       targetCredentials: true,
+      roles: false,
     });
 
     expect(getResource.mock.calls.map(([path]) => path)).toEqual([
@@ -64,6 +66,7 @@ describe('deployment profile credential permissions', () => {
       registries: false,
       scripts: false,
       targetCredentials: false,
+      roles: false,
     });
 
     expect(getResource.mock.calls.map(([path]) => path)).toEqual([

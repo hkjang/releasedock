@@ -7,7 +7,7 @@ ReleaseDock는 폐쇄망에서 운영하는 Release Orchestrator / Deployment Ga
 - `backend/`: Go API, 인증, 설정, RBAC, 감사, AI streaming proxy, MCP endpoint
 - `runner/`: PostgreSQL job queue/Harbor 실행기와 secret 없는 승인 Script executor
 - `web/`: React + TypeScript + MUI 운영 포털
-- `deploy/`: systemd 기반 폐쇄망 설치 자산
+- `deploy/`: systemd 기반 폐쇄망 설치 자산과 standalone 제어 스크립트 (`releasedock.sh`)
 - `scripts/`: 재현 가능한 빌드와 릴리즈 패키징
 - `docs/`: 아키텍처, 보안 모델, API 및 운영 문서
 
@@ -39,6 +39,8 @@ openssl rand -base64 32
 make test
 make build
 ```
+
+기동·종료·재기동과 환경 진단은 `make start` / `make stop` / `make restart` / `make status` / `make doctor` 를 사용합니다.
 
 개발 상세는 각 하위 디렉터리의 README를 참고하십시오.
 
@@ -77,13 +79,30 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 관리 화면에서 관리 기능을 사용할 수 있는 출발지 IP 허용 목록을 관리합니다. `/api/v1/admin/` 이하의 모든 관리 API에 적용되며, 자기 자신을 잠그는 저장은 거부되고 루프백은 항상 허용됩니다. 리버스 프록시 뒤에서 운영한다면 신뢰 프록시 CIDR을 함께 등록해야 합니다.
 
+## Standalone 기동
+
+systemd 없이 바로 띄우려면 패키지의 `releasedock.sh` 를 사용합니다. 평가 환경이나 심플 모드만 쓰는 설치에 적합합니다.
+
+```bash
+./releasedock.sh doctor     # 환경 진단 (실패가 있으면 종료 코드 1)
+./releasedock.sh start      # 기동
+./releasedock.sh status
+./releasedock.sh restart
+./releasedock.sh stop
+./releasedock.sh logs server -f
+```
+
+소스 체크아웃에서는 `make build` 후 `make doctor` / `make start` / `make stop` / `make restart` / `make status` / `make logs` 로 같은 일을 합니다.
+
+`doctor` 는 실행 파일, 환경 변수, 포트, 데이터 경로, PostgreSQL 접속과 마이그레이션 수, 프로세스 상태와 `/healthz`, 격리 경계까지 점검합니다. 승인 스크립트를 격리 UID 로 실행하는 executor 는 systemd socket activation 이 필요하므로 standalone 에서는 심플 모드만 완전히 동작합니다. 자세한 내용은 [폐쇄망 운영 가이드](docs/offline-install.md)에 있습니다.
+
 ## 폐쇄망 배포
 
 인터넷이 연결된 빌드 환경에서 아래 명령을 실행하면 런타임 의존성이 없는 Linux amd64 바이너리와 정적 웹 자산, 설치 스크립트만 포함한 파일을 만듭니다.
 
 ```bash
 make package
-# release/releasedock-v0.3.2.tar.gz
+# release/releasedock-v0.3.3.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.

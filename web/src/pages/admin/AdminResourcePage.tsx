@@ -11,15 +11,20 @@ import {
   Button,
   Card,
   Checkbox,
+  Chip,
   CircularProgress,
   Dialog,
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
   FormControlLabel,
+  FormHelperText,
   IconButton,
   InputAdornment,
+  InputLabel,
   MenuItem,
+  Select,
   Stack,
   Table,
   TableBody,
@@ -56,7 +61,9 @@ interface FieldConfig {
   helperText?: string;
   defaultValue?: unknown;
   options?: Array<{ label: string; value: string }>;
-  relation?: 'applications' | 'environments' | 'profiles' | 'registries' | 'scripts' | 'targetCredentials';
+  relation?: 'applications' | 'environments' | 'profiles' | 'registries' | 'scripts' | 'targetCredentials' | 'roles';
+  /** Renders a chip multi-select and keeps the value as a string array. */
+  multiple?: boolean;
   scriptType?: 'PRE_CHECK' | 'DEPLOY' | 'HEALTH_CHECK' | 'ROLLBACK';
   pattern?: RegExp;
 }
@@ -152,7 +159,7 @@ export const resourceConfigs = {
     title: '사용자 관리', description: '로컬 및 OIDC 사용자 상태와 역할을 관리합니다.', singular: '사용자', endpoint: '/admin/users',
     writePermission: 'admin.users.write',
     columns: [{ key: 'username', label: '사용자 이름' }, { key: 'displayName', label: '표시 이름' }, { key: 'email', label: '이메일' }, { key: 'source', label: '인증 소스' }, { key: 'roles', label: '역할' }, { key: 'active', label: '상태', status: true }],
-    fields: [{ key: 'username', label: '사용자 이름', requiredOnCreate: true, createOnly: true, helperText: '로컬 사용자 생성 시 필요하며 생성 후에는 변경되지 않습니다.' }, { key: 'password', label: '초기 비밀번호', type: 'password', requiredOnCreate: true, createOnly: true, helperText: '12자 이상 입력합니다. 이후 비밀번호 변경은 사용자 개인화 페이지에서 처리합니다.' }, { key: 'displayName', label: '표시 이름', required: true }, { key: 'email', label: '이메일' }, { key: 'roles', label: '역할 ID 또는 이름', required: true, helperText: '쉼표로 구분 (예: operator, viewer)' }, { key: 'active', label: '활성화', type: 'boolean', defaultValue: true }],
+    fields: [{ key: 'username', label: '사용자 이름', requiredOnCreate: true, createOnly: true, helperText: '로컬 사용자 생성 시 필요하며 생성 후에는 변경되지 않습니다.' }, { key: 'password', label: '초기 비밀번호', type: 'password', requiredOnCreate: true, createOnly: true, helperText: '12자 이상 입력합니다. 이후 비밀번호 변경은 사용자 개인화 페이지에서 처리합니다.' }, { key: 'displayName', label: '표시 이름', required: true }, { key: 'email', label: '이메일' }, { key: 'roles', label: '역할', required: true, relation: 'roles', multiple: true, helperText: '등록된 역할에서 선택합니다. 여러 개를 지정할 수 있습니다.' }, { key: 'active', label: '활성화', type: 'boolean', defaultValue: true }],
     allowDelete: false,
   },
   roles: {
@@ -177,7 +184,7 @@ function displayValue(row: ResourceRow, column: ColumnConfig) {
 }
 
 function defaults(config: ResourceConfig): Record<string, unknown> {
-  return Object.fromEntries(config.fields.map((field) => [field.key, field.defaultValue ?? (field.type === 'boolean' ? false : '')]));
+  return Object.fromEntries(config.fields.map((field) => [field.key, field.defaultValue ?? (field.type === 'boolean' ? false : field.multiple ? [] : '')]));
 }
 
 type RelationData = Record<NonNullable<FieldConfig['relation']>, ResourceRow[]>;
@@ -197,15 +204,16 @@ export async function loadRelations(config: ResourceConfig, access: RelationAcce
     }
     return rows;
   };
-  const [applications, environments, profiles, registries, scripts, targetCredentials] = await Promise.all([
+  const [applications, environments, profiles, registries, scripts, targetCredentials, roles] = await Promise.all([
     load('applications', '/applications'),
     load('environments', '/environments'),
     load('profiles', '/deployment-profiles'),
     load('registries', '/admin/registries'),
     load('scripts', '/admin/scripts'),
     load('targetCredentials', '/admin/target-credentials'),
+    load('roles', '/admin/roles'),
   ]);
-  return { applications, environments, profiles, registries, scripts, targetCredentials };
+  return { applications, environments, profiles, registries, scripts, targetCredentials, roles };
 }
 
 export function buildResourcePayload(config: ResourceConfig, values: Record<string, unknown>, editing: boolean, canWriteTargetCredentialBinding: boolean) {
@@ -214,7 +222,12 @@ export function buildResourcePayload(config: ResourceConfig, values: Record<stri
   if (config.endpoint === '/deployment-profiles' && canWriteTargetCredentialBinding) payload.targetCredentialId = values.targetCredentialId ?? '';
   activeFields.forEach((field) => {
     if (field.type === 'number') payload[field.key] = Number(payload[field.key]);
-    if ((field.key === 'roles' || field.key === 'permissions' || field.key === 'labels' || field.key === 'runnerLabels') && typeof payload[field.key] === 'string') {
+    // A multi-select already holds an array; only the free-text list
+    // fields need splitting.
+    if (field.multiple && !Array.isArray(payload[field.key])) {
+      payload[field.key] = payload[field.key] ? [String(payload[field.key])] : [];
+    }
+    if (!field.multiple && (field.key === 'roles' || field.key === 'permissions' || field.key === 'labels' || field.key === 'runnerLabels') && typeof payload[field.key] === 'string') {
       payload[field.key] = (payload[field.key] as string).split(',').map((item) => item.trim()).filter(Boolean);
     }
     if (field.type === 'password' && editing && !payload[field.key]) delete payload[field.key];
@@ -231,6 +244,7 @@ function ResourceDialog({ config, row, open, onClose, onSaved }: { config: Resou
     registries: hasPermission('admin.registries.read'),
     scripts: hasPermission('admin.scripts.read'),
     targetCredentials: hasPermission('admin.credentials.read'),
+    roles: hasPermission('admin.rbac.read'),
   }), [hasPermission]);
   const canReadTargetCredentials = relationAccess.targetCredentials;
   const canWriteTargetCredentialBinding = canReadTargetCredentials && hasPermission('admin.credentials.write');
@@ -249,10 +263,18 @@ function ResourceDialog({ config, row, open, onClose, onSaved }: { config: Resou
   const activeFields = config.fields.filter((field) => !row || !field.createOnly);
   const targetCredentialField: FieldConfig = { key: 'targetCredentialId', label: '배포 대상 Credential', relation: 'targetCredentials' };
   const valid = activeFields.every((field) => {
-    const value = String(values[field.key] ?? '').trim();
     const required = field.required || (!row && field.requiredOnCreate);
+    if (field.multiple) {
+      const selected = Array.isArray(values[field.key]) ? (values[field.key] as string[]) : [];
+      return !required || selected.length > 0;
+    }
+    const value = String(values[field.key] ?? '').trim();
     return (!required || field.type === 'boolean' || value) && (!field.pattern || !value || field.pattern.test(value));
   });
+
+  // Chips show the readable name rather than the stored identifier.
+  const optionLabel = (field: FieldConfig, value: string): string =>
+    relationOptions(field).find((option) => option.value === value)?.label ?? value;
 
   const relationOptions = (field: FieldConfig): Array<{ label: string; value: string }> => {
     if (!field.relation) return field.options ?? [];
@@ -260,6 +282,15 @@ function ResourceDialog({ config, row, open, onClose, onSaved }: { config: Resou
     if (field.relation === 'environments' && values.applicationId) rows = rows.filter((item) => !item.applicationId || item.applicationId === values.applicationId);
     if (field.relation === 'profiles') rows = rows.filter((item) => (!values.applicationId || !item.applicationId || item.applicationId === values.applicationId) && (!values.environmentId || !item.environmentId || item.environmentId === values.environmentId));
     if (field.relation === 'scripts' && field.scriptType) rows = rows.filter((item) => item.type === field.scriptType && item.active !== false && item.approved !== false);
+    if (field.relation === 'roles') {
+      const options = rows.map((item) => ({ value: item.id, label: String(item.name || item.id) }));
+      const current = Array.isArray(values[field.key]) ? (values[field.key] as string[]) : [];
+      // Keep an assigned role visible even if it is no longer listed.
+      current.forEach((value) => {
+        if (!options.some((option) => option.value === value)) options.push({ value, label: `${value} (목록에 없음)` });
+      });
+      return options;
+    }
     const options = rows.map((item) => ({
       value: item.id,
       label: field.relation === 'applications'
@@ -299,7 +330,36 @@ function ResourceDialog({ config, row, open, onClose, onSaved }: { config: Resou
       <DialogTitle>{row ? `${config.singular} 수정` : `${config.singular} 등록`}</DialogTitle>
       <DialogContent>
         <Stack spacing={2.25} sx={{ pt: 1 }}>
-          {activeFields.map((field) => field.type === 'boolean' ? (
+          {activeFields.map((field) => field.multiple ? (
+            <FormControl key={field.key} fullWidth error={Boolean(field.required && !((values[field.key] as string[] | undefined)?.length))}>
+              <InputLabel id={`label-${field.key}`}>{field.label}</InputLabel>
+              <Select
+                multiple
+                labelId={`label-${field.key}`}
+                label={field.label}
+                value={Array.isArray(values[field.key]) ? (values[field.key] as string[]) : []}
+                onChange={(event) => setValue(field.key, typeof event.target.value === 'string' ? event.target.value.split(',') : event.target.value)}
+                disabled={Boolean(field.relation && relations.loading)}
+                renderValue={(selected) => (
+                  <Stack direction="row" spacing={0.75} sx={{ flexWrap: 'wrap', gap: 0.75 }}>
+                    {(selected as string[]).map((value) => (
+                      <Chip key={value} size="small" label={optionLabel(field, value)} />
+                    ))}
+                  </Stack>
+                )}
+              >
+                {relationOptions(field).map((option) => (
+                  <MenuItem key={option.value} value={option.value}>
+                    <Checkbox checked={(Array.isArray(values[field.key]) ? (values[field.key] as string[]) : []).includes(option.value)} sx={{ mr: 1, p: 0.5 }} />
+                    {option.label}
+                  </MenuItem>
+                ))}
+              </Select>
+              <FormHelperText>
+                {field.relation && relations.error ? `선택 목록을 불러오지 못했습니다: ${relations.error.message}` : field.helperText}
+              </FormHelperText>
+            </FormControl>
+          ) : field.type === 'boolean' ? (
             <FormControlLabel key={field.key} control={<Checkbox checked={Boolean(values[field.key])} onChange={(event) => setValue(field.key, event.target.checked)} />} label={field.label} />
           ) : (
             <TextField

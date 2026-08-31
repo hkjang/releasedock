@@ -470,6 +470,10 @@ export const api = {
     return { items, page, pageSize: response.pageSize ?? pageSize, total: response.total ?? ((page - 1) * pageSize + items.length) };
   },
 
+  permissions: async () => {
+    const response = await request<{ items: Array<{ code: string; description: string }> }>('/admin/permissions');
+    return response.items ?? [];
+  },
   uiMode: () => request<UiModeInfo>('/ui-mode'),
   setPreferredUiMode: (mode: 'simple' | 'full') =>
     request<void>('/me/preferences', { method: 'PATCH', body: { uiMode: mode } }),

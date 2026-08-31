@@ -5,6 +5,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary';
 import { AppShell } from '../layout/AppShell';
 import { AuditPage } from '../pages/admin/AuditPage';
 import { AdminResourcePage, resourceConfigs } from '../pages/admin/AdminResourcePage';
+import { RolesPage } from '../pages/admin/RolesPage';
 import { SettingsPage } from '../pages/admin/SettingsPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { LoginPage } from '../pages/LoginPage';
@@ -51,7 +52,7 @@ export function App() {
                   <Route path="admin/target-credentials" element={<RequirePermission permission="admin.credentials.read"><AdminResourcePage config={resourceConfigs.targetCredentials} /></RequirePermission>} />
                   <Route path="admin/runners" element={<RequirePermission permission="admin.runners.read"><AdminResourcePage config={resourceConfigs.runners} /></RequirePermission>} />
                   <Route path="admin/users" element={<RequirePermission permission="admin.users.read"><AdminResourcePage config={resourceConfigs.users} /></RequirePermission>} />
-                  <Route path="admin/roles" element={<RequirePermission permission="admin.rbac.read"><AdminResourcePage config={resourceConfigs.roles} /></RequirePermission>} />
+                  <Route path="admin/roles" element={<RequirePermission permission="admin.rbac.read"><RolesPage /></RequirePermission>} />
                   <Route path="admin/audit" element={<RequirePermission permission="audit.read"><AuditPage /></RequirePermission>} />
                   <Route path="admin/settings/general" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="general" /></RequirePermission>} />
                   <Route path="admin/settings/oidc" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="oidc" /></RequirePermission>} />
