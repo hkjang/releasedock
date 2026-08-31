@@ -116,6 +116,30 @@ Keycloak 연동에 필요한 값은 **Issuer, Client ID, Client Secret** 세 가
 - `X-Forwarded-Proto`와 `X-Forwarded-Host`는 **관리자 접근 IP 설정의 신뢰 프록시 CIDR에 등록된 주소에서 온 요청에만** 반영합니다. 등록되지 않은 출처의 헤더는 무시하므로 클라이언트가 Redirect URI를 조작할 수 없습니다.
 - 호스트가 여러 개이거나 특정 값을 강제해야 하면 Redirect URI를 직접 입력하십시오.
 
+### token_endpoint is invalid 오류
+
+이 오류는 Keycloak의 discovery 문서(`/.well-known/openid-configuration`)가 내려준 endpoint를 서버가 받아들일 수 없을 때 발생합니다. 오류 메시지에 문제가 된 endpoint 이름과 실제 값, 그리고 이유가 함께 표시됩니다.
+
+먼저 Keycloak이 무엇을 내려주는지 확인하십시오.
+
+```bash
+curl -s https://keycloak.company.local/realms/company/.well-known/openid-configuration \
+  | tr , '\n' | grep -E 'issuer|authorization_endpoint|token_endpoint|jwks_uri'
+```
+
+가장 흔한 원인은 **Keycloak이 backchannel URL을 내부 평문 HTTP로 내려주는 구성**입니다. Keycloak은 frontend URL(`authorization_endpoint`)과 backchannel URL(`token_endpoint`, `jwks_uri`)을 다르게 생성할 수 있어서, 앞단은 `https://`인데 `token_endpoint`만 `http://내부호스트:8080/...`으로 나오는 경우가 있습니다.
+
+해결 방법은 두 가지입니다.
+
+1. **권장** — Keycloak 쪽에서 고칩니다. `KC_HOSTNAME`을 공개 주소로 지정하고 `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=false`로 두면 backchannel도 같은 HTTPS 주소를 사용합니다. 리버스 프록시 뒤라면 `KC_PROXY_HEADERS=xforwarded`도 함께 설정하십시오.
+2. **폐쇄망에서 TLS가 없는 경우** — 관리 화면의 Keycloak OIDC 설정에서 `내부 평문 HTTP endpoint 허용`을 켭니다. Client Secret이 평문으로 전송되므로, 이 옵션을 켜도 서버는 **공개 라우팅 가능한 호스트에는 평문을 허용하지 않습니다.** 사설 IP(RFC1918/RFC4193), 루프백, 링크로컬, 점 없는 내부 이름과 `.local`·`.internal`·`.intranet` 도메인만 받아들입니다.
+
+다른 원인들:
+
+- `OIDC discovery issuer ... does not exactly match ...` — 설정한 Issuer 문자열이 Keycloak이 내려준 `issuer`와 **정확히** 일치해야 합니다. 뒤 슬래시나 호스트명 차이도 불일치입니다.
+- `OIDC discovery token_endpoint is missing` — realm 경로가 틀렸거나 discovery 문서가 예상과 다릅니다.
+- `OIDC discovery request: ...` — 네트워크나 TLS 신뢰 문제입니다. 사설 CA라면 서버의 트러스트 스토어에 CA를 설치해야 합니다.
+
 ## 사용자 흐름
 
 1. Keycloak SSO로 로그인합니다.
@@ -130,7 +154,7 @@ Keycloak 연동에 필요한 값은 **Issuer, Client ID, Client Secret** 세 가
 
 ### 메뉴 제한
 
-심플 모드에서는 메뉴가 **배포**와 **실행 기록**, 그리고 **내 프로필**만 노출됩니다. 릴리즈·대시보드·배포 프로필·Harbor·Runner 등 전체 모드의 화면은 보이지 않습니다. 관리 권한이 있는 사용자에게만 **관리** 섹션(심플 대상, 심플 모드 설정, 관리자 접근 IP, 사용자, Keycloak OIDC, 감사 로그)이 추가로 보입니다.
+심플 모드에서는 메뉴가 **배포**와 **실행 기록**, 그리고 **내 프로필**만 노출됩니다. 릴리즈·대시보드·배포 프로필·Harbor·Runner 등 전체 모드의 화면은 보이지 않습니다. 관리 권한이 있는 사용자에게만 **관리** 섹션(심플 대상, 심플 모드 설정, 일반 설정, 관리자 접근 IP, 사용자, Keycloak OIDC, 감사 로그)이 추가로 보입니다.
 
 두 모드를 모두 쓸 수 있는 사용자는 우측 상단 프로필 메뉴에서 모드를 전환할 수 있으며, 선택은 개인 설정으로 저장되어 다음 로그인에도 유지됩니다.
 

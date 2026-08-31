@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -32,6 +33,9 @@ type oidcSettings struct {
 	RedirectURL     string
 	Scopes          []string
 	AutoCreateUser  bool
+	// AllowInsecureEndpoints permits plaintext HTTP OIDC endpoints, but only to
+	// non-public hosts. Needed for air-gapped Keycloak without TLS.
+	AllowInsecureEndpoints bool
 	DefaultRoleID   *string
 }
 
@@ -49,12 +53,12 @@ func (s *Server) loadOIDC(ctx context.Context) (oidcSettings, error) {
 
 func loadOIDCWithQueryer(ctx context.Context, queryer dependencyQueryer, forUpdate bool) (oidcSettings, error) {
 	var cfg oidcSettings
-	query := `SELECT enabled,issuer,client_id,client_secret_enc,redirect_url,scopes,auto_create_user,default_role_id FROM oidc_settings WHERE id='default'`
+	query := `SELECT enabled,issuer,client_id,client_secret_enc,redirect_url,scopes,auto_create_user,allow_insecure_endpoints,default_role_id FROM oidc_settings WHERE id='default'`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
 	err := queryer.QueryRow(ctx, query).
-		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.DefaultRoleID)
+		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.AllowInsecureEndpoints, &cfg.DefaultRoleID)
 	return cfg, err
 }
 
@@ -66,7 +70,7 @@ const oidcCallbackPath = "/api/v1/auth/oidc/callback"
 // requestOrigin reconstructs the origin the browser actually used. Forwarded
 // headers are honoured only when the immediate peer is a configured trusted
 // proxy; otherwise a client could choose its own redirect URI.
-func (s *Server) requestOrigin(ctx context.Context, r *http.Request) string {
+func (s *Server) requestOrigin(ctx context.Context, r *http.Request, allowInsecure bool) string {
 	host := r.Host
 	scheme := "http"
 	if r.TLS != nil {
@@ -85,7 +89,7 @@ func (s *Server) requestOrigin(ctx context.Context, r *http.Request) string {
 	// A TLS-terminating proxy that forwards neither X-Forwarded-Proto nor a
 	// trusted-proxy entry would otherwise yield http, which every identity
 	// provider rejects for a non-loopback redirect URI.
-	if scheme == "http" && !loopbackHost(host) {
+	if scheme == "http" && !loopbackHost(host) && !allowInsecure {
 		scheme = "https"
 	}
 	if !validOriginHost(host) {
@@ -131,7 +135,7 @@ func (s *Server) resolveOIDCRedirectURI(ctx context.Context, r *http.Request, cf
 	if origin, err := s.configuredPublicOrigin(ctx); err == nil && origin != "" {
 		return origin + oidcCallbackPath
 	}
-	if origin := s.requestOrigin(ctx, r); origin != "" {
+	if origin := s.requestOrigin(ctx, r, cfg.AllowInsecureEndpoints); origin != "" {
 		return origin + oidcCallbackPath
 	}
 	return ""
@@ -146,11 +150,85 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"local_enabled": true, "oidc": map[string]any{"enabled": cfg.Enabled, "issuer": cfg.Issuer}})
 }
 
-func (s *Server) discoverOIDC(ctx context.Context, issuer string) (oidcDiscovery, error) {
+// privatePlaintextHost reports whether a plaintext endpoint may target this
+// host. Loopback, RFC1918/RFC4193 private ranges, link-local and dotless
+// internal hostnames are permitted; a publicly routable host is not, so an
+// opt-in for an air-gapped Keycloak cannot leak a client secret to the
+// internet in cleartext.
+func privatePlaintextHost(host string) bool {
+	name := host
+	if parsedHost, _, err := net.SplitHostPort(host); err == nil {
+		name = parsedHost
+	}
+	name = strings.Trim(name, "[]")
+	if name == "" {
+		return false
+	}
+	if address, err := netip.ParseAddr(name); err == nil {
+		address = address.Unmap()
+		return address.IsLoopback() || address.IsPrivate() || address.IsLinkLocalUnicast() ||
+			address.IsLinkLocalMulticast() || address.IsUnspecified()
+	}
+	if strings.EqualFold(name, "localhost") {
+		return true
+	}
+	// A dotless name can only resolve inside a search domain, so it is
+	// necessarily internal. ".local" and ".internal" are likewise not routable.
+	lower := strings.ToLower(name)
+	return !strings.Contains(lower, ".") ||
+		strings.HasSuffix(lower, ".local") ||
+		strings.HasSuffix(lower, ".internal") ||
+		strings.HasSuffix(lower, ".intranet")
+}
+
+// validateOIDCEndpoint checks one discovery URL. The error names the offending
+// value and the reason, because "token_endpoint is invalid" on its own gives an
+// administrator nothing to act on.
+func validateOIDCEndpoint(name, raw string, allowInsecure bool) error {
+	if strings.TrimSpace(raw) == "" {
+		return fmt.Errorf("OIDC discovery %s is missing", name)
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("OIDC discovery %s is not a valid URL: %q", name, raw)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("OIDC discovery %s has no host: %q", name, raw)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("OIDC discovery %s must not contain userinfo: %q", name, raw)
+	}
+	if parsed.Fragment != "" {
+		return fmt.Errorf("OIDC discovery %s must not contain a fragment: %q", name, raw)
+	}
+	switch parsed.Scheme {
+	case "https":
+		return nil
+	case "http":
+		if !allowInsecure {
+			return fmt.Errorf(
+				"OIDC discovery %s uses plaintext HTTP (%q). Keycloak이 이 endpoint를 HTTPS로 내려주도록 고치거나, 폐쇄망이라면 OIDC 설정에서 '내부 평문 HTTP endpoint 허용'을 켜십시오",
+				name, raw)
+		}
+		if !privatePlaintextHost(parsed.Host) {
+			return fmt.Errorf(
+				"OIDC discovery %s uses plaintext HTTP to a publicly routable host (%q); this is refused even with the insecure option enabled",
+				name, raw)
+		}
+		return nil
+	default:
+		return fmt.Errorf("OIDC discovery %s must use http or https: %q", name, raw)
+	}
+}
+
+func (s *Server) discoverOIDC(ctx context.Context, issuer string, allowInsecure bool) (oidcDiscovery, error) {
 	issuer = strings.TrimSuffix(strings.TrimSpace(issuer), "/")
 	parsed, err := url.Parse(issuer)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return oidcDiscovery{}, errors.New("OIDC issuer must be an absolute HTTPS URL without userinfo, query, or fragment")
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return oidcDiscovery{}, errors.New("OIDC issuer must be an absolute URL without userinfo, query, or fragment")
+	}
+	if err := validateOIDCEndpoint("issuer", issuer, allowInsecure); err != nil {
+		return oidcDiscovery{}, err
 	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, issuer+"/.well-known/openid-configuration", nil)
 	req.Header.Set("Accept", "application/json")
@@ -168,12 +246,20 @@ func (s *Server) discoverOIDC(ctx context.Context, issuer string) (oidcDiscovery
 		return oidcDiscovery{}, fmt.Errorf("decode OIDC discovery: %w", err)
 	}
 	if discovery.Issuer != issuer {
-		return oidcDiscovery{}, errors.New("OIDC discovery issuer does not exactly match configured issuer")
+		return oidcDiscovery{}, fmt.Errorf(
+			"OIDC discovery issuer %q does not exactly match the configured issuer %q",
+			discovery.Issuer, issuer)
 	}
-	for name, endpoint := range map[string]string{"authorization_endpoint": discovery.AuthorizationEndpoint, "token_endpoint": discovery.TokenEndpoint, "jwks_uri": discovery.JWKSURI} {
-		parsedEndpoint, err := url.Parse(endpoint)
-		if err != nil || parsedEndpoint.Scheme != "https" || parsedEndpoint.Host == "" || parsedEndpoint.User != nil || parsedEndpoint.Fragment != "" {
-			return oidcDiscovery{}, fmt.Errorf("OIDC discovery %s is invalid", name)
+	// Ordered rather than map iteration so a document with several problems
+	// always reports the same one, which keeps the message reproducible.
+	endpoints := []struct{ name, value string }{
+		{"authorization_endpoint", discovery.AuthorizationEndpoint},
+		{"token_endpoint", discovery.TokenEndpoint},
+		{"jwks_uri", discovery.JWKSURI},
+	}
+	for _, endpoint := range endpoints {
+		if err := validateOIDCEndpoint(endpoint.name, endpoint.value, allowInsecure); err != nil {
+			return oidcDiscovery{}, err
 		}
 	}
 	return discovery, nil
@@ -189,7 +275,7 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "oidc_disabled", "OIDC login is not enabled")
 		return
 	}
-	discovery, err := s.discoverOIDC(r.Context(), cfg.Issuer)
+	discovery, err := s.discoverOIDC(r.Context(), cfg.Issuer, cfg.AllowInsecureEndpoints)
 	if err != nil {
 		s.log.Error("OIDC discovery", "error", err)
 		writeError(w, http.StatusBadGateway, "oidc_discovery_failed", "identity provider discovery failed")
@@ -256,7 +342,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	if redirectURI == "" {
 		redirectURI = s.resolveOIDCRedirectURI(r.Context(), r, cfg)
 	}
-	discovery, err := s.discoverOIDC(r.Context(), cfg.Issuer)
+	discovery, err := s.discoverOIDC(r.Context(), cfg.Issuer, cfg.AllowInsecureEndpoints)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "oidc_discovery_failed", "identity provider discovery failed")
 		return

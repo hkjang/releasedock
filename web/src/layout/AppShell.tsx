@@ -85,6 +85,9 @@ const simpleSections: NavSection[] = [
     items: [
       { label: '심플 대상', path: '/admin/simple-targets', icon: DnsRoundedIcon, permission: 'admin.simple.read' },
       { label: '심플 모드 설정', path: '/admin/settings/simple', icon: TuneRoundedIcon, permission: 'admin.simple.read' },
+      // 일반 설정 holds the public HTTPS URL that OIDC redirect derivation
+      // reads, so simple mode must not hide it.
+      { label: '일반 설정', path: '/admin/settings/general', icon: SettingsRoundedIcon, permission: 'admin.settings.read' },
       { label: '관리자 접근 IP', path: '/admin/settings/network', icon: LanRoundedIcon, permission: 'admin.settings.read' },
       { label: '사용자', path: '/admin/users', icon: PersonRoundedIcon, permission: 'admin.users.read' },
       { label: 'Keycloak OIDC', path: '/admin/settings/oidc', icon: LanRoundedIcon, permission: 'admin.settings.read' },

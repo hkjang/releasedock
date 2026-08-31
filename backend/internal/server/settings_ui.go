@@ -375,6 +375,7 @@ func (s *Server) putOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	autoCreate := settingBool(values, "autoProvision", false)
+	allowInsecure := settingBool(values, "allowInsecureEndpoints", current.AllowInsecureEndpoints)
 	if verify, exists := values["verifyTls"].(bool); exists && !verify && enabled {
 		writeError(w, 400, "invalid_oidc_settings", "TLS verification cannot be disabled; install the internal CA in the service trust store")
 		return
@@ -407,14 +408,18 @@ func (s *Server) putOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		// Only an explicitly supplied redirect URI is format-checked; a blank
 		// value is resolved per request at login time.
 		if redirectURL != "" {
+			if err := validateOIDCEndpoint("redirectUrl", redirectURL, allowInsecure); err != nil {
+				writeError(w, 400, "invalid_oidc_settings", err.Error())
+				return
+			}
 			redirect, parseErr := url.Parse(redirectURL)
-			if parseErr != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" {
-				writeError(w, 400, "invalid_oidc_settings", "redirectUrl must be an absolute HTTPS URL without query, fragment, or userinfo")
+			if parseErr != nil || redirect.RawQuery != "" {
+				writeError(w, 400, "invalid_oidc_settings", "redirectUrl must not contain a query string")
 				return
 			}
 		}
 		ctx, cancel := contextWithTimeout(r, 10*time.Second)
-		_, err = s.discoverOIDC(ctx, issuer)
+		_, err = s.discoverOIDC(ctx, issuer, allowInsecure)
 		cancel()
 		if err != nil {
 			writeError(w, 400, "oidc_discovery_failed", err.Error())
@@ -429,7 +434,7 @@ func (s *Server) putOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(values, "clientSecret")
 	encoded, _ := json.Marshal(values)
-	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,default_role_id=$8,config=$9,updated_by=$10,updated_at=now() WHERE id='default'`, enabled, issuer, clientID, secretEnc, redirectURL, scopes, autoCreate, roleID, encoded, p.UserID)
+	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,default_role_id=$9,config=$10,updated_by=$11,updated_at=now() WHERE id='default'`, enabled, issuer, clientID, secretEnc, redirectURL, scopes, autoCreate, allowInsecure, roleID, encoded, p.UserID)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}

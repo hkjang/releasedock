@@ -234,9 +234,16 @@ func (s *Server) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not load OIDC settings")
 		return
 	}
+	// Missing or unset is not an error here; it simply means the redirect URI
+	// falls back to the incoming request.
+	publicURL, _ := s.configuredPublicOrigin(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": cfg.Enabled, "issuerUrl": cfg.Issuer, "clientId": cfg.ClientID,
 		"secretConfigured": cfg.ClientSecretEnc != "", "redirectUrl": cfg.RedirectURL,
+		"allowInsecureEndpoints": cfg.AllowInsecureEndpoints,
+		// Read-only context: the public URL lives in general settings but is what
+		// the redirect URI is derived from, so it is shown where SSO is configured.
+		"publicUrl": publicURL,
 		// What the server will actually send, so an administrator can register
 		// it in Keycloak without configuring it here.
 		"effectiveRedirectUri": s.resolveOIDCRedirectURI(r.Context(), r, cfg),
@@ -251,6 +258,7 @@ type oidcSettingsInput struct {
 	ClientID       *string   `json:"client_id"`
 	ClientSecret   *string   `json:"client_secret"`
 	RedirectURL    *string   `json:"redirect_url"`
+	AllowInsecure  *bool     `json:"allow_insecure_endpoints"`
 	Scopes         *[]string `json:"scopes"`
 	AutoCreateUser *bool     `json:"auto_create_user"`
 	DefaultRoleID  *string   `json:"default_role_id"`
@@ -289,6 +297,9 @@ func (s *Server) updateOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	if input.RedirectURL != nil {
 		current.RedirectURL = strings.TrimSpace(*input.RedirectURL)
 	}
+	if input.AllowInsecure != nil {
+		current.AllowInsecureEndpoints = *input.AllowInsecure
+	}
 	if input.Scopes != nil {
 		current.Scopes = *input.Scopes
 	}
@@ -324,14 +335,18 @@ func (s *Server) updateOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		// from the public URL or the incoming request. Only an explicit value
 		// is format-checked.
 		if current.RedirectURL != "" {
+			if err := validateOIDCEndpoint("redirect_url", current.RedirectURL, current.AllowInsecureEndpoints); err != nil {
+				writeError(w, 400, "invalid_oidc_settings", err.Error())
+				return
+			}
 			redirect, parseErr := url.Parse(current.RedirectURL)
-			if parseErr != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" {
-				writeError(w, 400, "invalid_oidc_settings", "redirect_url must be an absolute HTTPS URL without query, fragment, or userinfo")
+			if parseErr != nil || redirect.RawQuery != "" {
+				writeError(w, 400, "invalid_oidc_settings", "redirect_url must not contain a query string")
 				return
 			}
 		}
 		ctx, cancel := contextWithTimeout(r, 10*time.Second)
-		_, discoveryErr := s.discoverOIDC(ctx, current.Issuer)
+		_, discoveryErr := s.discoverOIDC(ctx, current.Issuer, current.AllowInsecureEndpoints)
 		cancel()
 		if discoveryErr != nil {
 			writeError(w, 400, "oidc_discovery_failed", discoveryErr.Error())
@@ -344,7 +359,7 @@ func (s *Server) updateOIDCSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,default_role_id=$8,updated_by=$9,updated_at=now() WHERE id='default'`, current.Enabled, current.Issuer, current.ClientID, secretEnc, current.RedirectURL, current.Scopes, current.AutoCreateUser, current.DefaultRoleID, p.UserID)
+	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,default_role_id=$9,updated_by=$10,updated_at=now() WHERE id='default'`, current.Enabled, current.Issuer, current.ClientID, secretEnc, current.RedirectURL, current.Scopes, current.AutoCreateUser, current.AllowInsecureEndpoints, current.DefaultRoleID, p.UserID)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}

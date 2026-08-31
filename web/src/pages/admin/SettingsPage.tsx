@@ -17,6 +17,7 @@ import {
   CircularProgress,
   FormControlLabel,
   InputAdornment,
+  Link as MuiLink,
   MenuItem,
   Stack,
   Switch,
@@ -24,6 +25,7 @@ import {
   Typography,
 } from '@mui/material';
 import { useEffect, useState, type ReactNode } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import { api } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { PageError, PageLoading } from '../../components/Feedback';
@@ -46,7 +48,7 @@ const metadata: Record<SettingSection, { title: string; description: string; ico
 
 const initialValues: Record<SettingSection, SettingValue> = {
   general: { serviceName: 'ReleaseDock', artifactMaxSizeGb: 20, publicUrl: '', secureCookies: false, allowedOrigins: [] },
-  oidc: { enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: '', scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true },
+  oidc: { enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: '', scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true, allowInsecureEndpoints: false },
   ai: { enabled: false, baseUrl: '', apiKey: '', model: '', streamingDefault: true, maxTokens: 32768 },
   approval: { enabled: false, protectedEnvironments: '', allowSelfApproval: false, requireRejectComment: true },
   storage: { driver: 'local', localPath: '/var/lib/releasedock/artifacts' },
@@ -82,7 +84,7 @@ function GeneralFields({ values, set, disabled }: FieldsProps) {
     <Stack spacing={2.25}>
       <TextField disabled={disabled} label="서비스 표시 이름" value={String(values.serviceName ?? '')} onChange={(e) => set('serviceName', e.target.value)} fullWidth />
       <TextField disabled={disabled} label="최대 아티팩트 크기" type="number" value={Number(values.artifactMaxSizeGb ?? 20)} onChange={(e) => set('artifactMaxSizeGb', Number(e.target.value))} fullWidth slotProps={{ input: { endAdornment: <InputAdornment position="end">GB</InputAdornment> } }} inputProps={{ min: 1, max: 1024 }} />
-      <TextField disabled={disabled} label="공개 HTTPS URL" value={String(values.publicUrl ?? '')} onChange={(e) => set('publicUrl', e.target.value)} placeholder="https://releasedock.company.local" helperText="TLS reverse proxy에서 사용하는 외부 origin입니다. OIDC redirect와 MCP Origin 검증에 사용됩니다." fullWidth />
+      <TextField disabled={disabled} label="사이트 공개 주소 (공개 HTTPS URL)" value={String(values.publicUrl ?? '')} onChange={(e) => set('publicUrl', e.target.value)} placeholder="https://releasedock.company.local" helperText="사용자가 접속하는 사이트 기본 주소입니다. Keycloak Redirect URI와 MCP Origin 검증이 이 값을 사용하므로, 리버스 프록시 뒤에서 운영한다면 넣어 두십시오. scheme과 host만 입력하고 경로는 붙이지 않습니다." fullWidth />
       <FormControlLabel control={<Switch disabled={disabled} checked={Boolean(values.secureCookies)} onChange={(e) => set('secureCookies', e.target.checked)} />} label="HTTPS Secure Cookie 강제" />
       <TextField disabled={disabled} label="MCP 추가 허용 Origin" value={allowedOrigins} onChange={(e) => set('allowedOrigins', e.target.value.split(/\r?\n/).map((value) => value.trim()).filter(Boolean))} multiline minRows={2} helperText="Origin을 한 줄에 하나씩 입력합니다. 공개 HTTPS URL은 자동으로 허용됩니다." fullWidth />
       <Alert severity="info" icon={<InfoOutlinedIcon />}>
@@ -102,6 +104,13 @@ function OidcFields({ values, set, disabled }: FieldsProps) {
     <Stack spacing={2.25}>
       <Alert severity={enabled ? 'success' : 'info'}>{enabled ? 'OIDC 로그인이 활성화되어 있습니다.' : 'OIDC가 비활성화되어 로컬 계정으로만 로그인합니다.'}</Alert>
       <FormControlLabel control={<Switch disabled={disabled} checked={enabled} onChange={(e) => set('enabled', e.target.checked)} />} label="Keycloak SSO 활성화" />
+      <Alert severity={values.publicUrl ? 'info' : 'warning'} icon={<InfoOutlinedIcon />}>
+        {values.publicUrl ? (
+          <>사이트 공개 주소: <strong>{String(values.publicUrl)}</strong> — Redirect URI는 이 주소에서 파생됩니다. 변경은 <MuiLink component={RouterLink} to="/admin/settings/general">일반 설정</MuiLink>에서 합니다.</>
+        ) : (
+          <>사이트 공개 주소가 설정되지 않았습니다. 지금은 접속에 사용된 주소에서 Redirect URI를 파생하므로 리버스 프록시 구성에 따라 값이 달라질 수 있습니다. <MuiLink component={RouterLink} to="/admin/settings/general">일반 설정</MuiLink>의 <strong>공개 HTTPS URL</strong>에 사이트 기본 주소를 넣어 두는 것을 권장합니다.</>
+        )}
+      </Alert>
       <TextField label="Issuer URL" required={enabled} disabled={disabled || !enabled} value={String(values.issuerUrl ?? '')} onChange={(e) => set('issuerUrl', e.target.value)} helperText="예: https://keycloak.company.local/realms/company" fullWidth />
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
         <TextField label="Client ID" required={enabled} disabled={disabled || !enabled} value={String(values.clientId ?? '')} onChange={(e) => set('clientId', e.target.value)} fullWidth />
@@ -116,6 +125,17 @@ function OidcFields({ values, set, disabled }: FieldsProps) {
         placeholder={String(values.effectiveRedirectUri ?? '')}
         helperText="비워 두면 서버가 자동으로 결정합니다. 일반 설정의 공개 HTTPS URL이 있으면 그 값을, 없으면 접속에 사용된 주소를 사용합니다. 특정 값을 강제해야 할 때만 입력하십시오."
       />
+      <FormControlLabel
+        control={<Switch disabled={disabled || !enabled} checked={Boolean(values.allowInsecureEndpoints)} onChange={(e) => set('allowInsecureEndpoints', e.target.checked)} />}
+        label="내부 평문 HTTP endpoint 허용 (폐쇄망)"
+      />
+      {Boolean(values.allowInsecureEndpoints) && (
+        <Alert severity="warning">
+          Keycloak이 <code>token_endpoint</code>나 <code>jwks_uri</code>를 평문 HTTP로 내려주는 구성에서 사용합니다. Client Secret이
+          암호화되지 않은 채 전송되므로, 공개된 주소에는 여전히 허용하지 않고 사설 IP·루프백·내부 도메인(.local, .internal, 점 없는 이름)만
+          받아들입니다. 가능하면 Keycloak 쪽 hostname 설정을 고쳐 HTTPS로 내려주게 하는 것이 낫습니다.
+        </Alert>
+      )}
       {Boolean(values.effectiveRedirectUri) && (
         <TextField
           label="Keycloak에 등록할 Redirect URI"

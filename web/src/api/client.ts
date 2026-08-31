@@ -305,6 +305,7 @@ function serializeSettings(section: SettingSection, value: SettingValue): Settin
       scopes: String(value.scopes ?? ''),
       autoProvision: Boolean(value.autoProvision),
       defaultRole: value.defaultRole || 'viewer',
+      allowInsecureEndpoints: Boolean(value.allowInsecureEndpoints),
       verifyTls: true,
     };
     if (value.clientSecret) result.clientSecret = value.clientSecret;

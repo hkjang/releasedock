@@ -69,7 +69,9 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 ## Keycloak SSO
 
-연동에 필요한 값은 **Issuer, Client ID, Client Secret** 세 가지입니다. Redirect URI는 입력하지 않아도 되며, 서버가 공개 HTTPS URL 또는 접속에 사용된 주소에서 파생하여 로그인 state에 고정한 뒤 토큰 교환에서 그대로 재사용합니다. Keycloak에 등록할 값은 관리 화면에 그대로 표시됩니다.
+연동에 필요한 값은 **Issuer, Client ID, Client Secret** 세 가지입니다. Redirect URI는 입력하지 않아도 되며, 서버가 일반 설정의 **사이트 공개 주소** 또는 접속에 사용된 주소에서 파생하여 로그인 state에 고정한 뒤 토큰 교환에서 그대로 재사용합니다. Keycloak에 등록할 값은 관리 화면에 그대로 표시됩니다.
+
+폐쇄망 Keycloak이 TLS 없이 운영되거나 backchannel(`token_endpoint`, `jwks_uri`)을 평문 HTTP로 내려주는 경우 `내부 평문 HTTP endpoint 허용`을 켜면 연동됩니다. 이 옵션을 켜도 공개 라우팅 가능한 호스트에는 평문을 허용하지 않습니다. discovery 오류 메시지는 문제가 된 endpoint 이름과 실제 값, 이유를 함께 알려줍니다.
 
 ## 관리자 접근 IP 제한
 
@@ -81,7 +83,7 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 ```bash
 make package
-# release/releasedock-v0.3.1.tar.gz
+# release/releasedock-v0.3.2.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.
