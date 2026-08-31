@@ -20,6 +20,7 @@ import (
 
 	"github.com/hkjang/releasedock/backend/internal/secure"
 	"github.com/hkjang/releasedock/backend/internal/store"
+	"github.com/hkjang/releasedock/backend/internal/webassets"
 )
 
 const maxJSONBody = 2 << 20
@@ -38,7 +39,8 @@ type Server struct {
 	log         *slog.Logger
 	build       BuildInfo
 	httpClient  *http.Client
-	webRoot     string
+	webFS       fs.FS
+	webOrigin   string
 	limiter     *loginLimiter
 	streamMu    sync.Mutex
 	streams     map[string]int
@@ -56,7 +58,11 @@ type Server struct {
 	networkExpiry time.Time
 }
 
+// New accepts a disk web root for tests and for an explicit operator
+// override. An empty value falls back to the assets embedded in this binary,
+// then to a directory discovered beside the executable.
 func New(st *store.Store, vault *secure.Vault, logger *slog.Logger, build BuildInfo, webRoot string) *Server {
+	web := ResolveWebAssets(webRoot)
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -75,10 +81,11 @@ func New(st *store.Store, vault *secure.Vault, logger *slog.Logger, build BuildI
 		}, CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return errOutboundRedirect
 		}},
-		webRoot:  webRoot,
-		limiter:  newLoginLimiter(),
-		streams:  make(map[string]int),
-		aiActive: make(map[string]int),
+		webFS:     web.FS,
+		webOrigin: web.Origin,
+		limiter:   newLoginLimiter(),
+		streams:   make(map[string]int),
+		aiActive:  make(map[string]int),
 	}
 }
 
@@ -286,8 +293,8 @@ func (s *Server) Handler() http.Handler {
 		writeError(w, http.StatusNotFound, "not_found", "API route not found")
 	})
 
-	if s.webRoot != "" {
-		mux.Handle("/", s.spaHandler(s.webRoot))
+	if s.webFS != nil {
+		mux.Handle("/", s.spaHandler(s.webFS))
 	}
 	return s.recover(s.securityHeaders(s.requestID(s.accessLog(mux))))
 }
@@ -469,6 +476,30 @@ func (s *Server) recover(next http.Handler) http.Handler {
 	})
 }
 
+// WebSource describes where the portal is served from, for startup logging.
+type WebSource struct {
+	FS     fs.FS
+	Origin string
+}
+
+// ResolveWebAssets picks the portal to serve. An explicit disk root always
+// wins so an operator can troubleshoot or patch assets without a rebuild; the
+// copy embedded in this binary comes next, which is what makes a single
+// executable self-sufficient; a discovered directory beside the binary is the
+// last resort and keeps `go run` working in development.
+func ResolveWebAssets(override string) WebSource {
+	if override != "" {
+		return WebSource{FS: os.DirFS(override), Origin: override}
+	}
+	if embedded := webassets.FS(); embedded != nil {
+		return WebSource{FS: embedded, Origin: "embedded"}
+	}
+	if root := FindWebRoot(); root != "" {
+		return WebSource{FS: os.DirFS(root), Origin: root}
+	}
+	return WebSource{}
+}
+
 func FindWebRoot() string {
 	candidates := []string{filepath.Join("web", "dist"), "web"}
 	if executable, err := os.Executable(); err == nil {
@@ -497,8 +528,8 @@ func findWebRoot(candidates []string) string {
 	return ""
 }
 
-func (s *Server) spaHandler(root string) http.Handler {
-	fileSystem := os.DirFS(root)
+func (s *Server) spaHandler(fileSystem fs.FS) http.Handler {
+
 	fileServer := http.FileServer(http.FS(fileSystem))
 	index, indexErr := fs.ReadFile(fileSystem, "index.html")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -619,3 +650,6 @@ func (l *loginLimiter) consume(key string, limit int, window time.Duration) bool
 	l.attempts[key] = a
 	return a.count <= limit
 }
+
+// WebOrigin reports where the portal is served from, for startup logging.
+func (s *Server) WebOrigin() string { return s.webOrigin }

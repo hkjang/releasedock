@@ -19,11 +19,11 @@ trap cleanup_stage EXIT
 
 "${PROJECT_DIR}/scripts/build.sh"
 
-mkdir -p "${STAGE_DIR}/bin" "${STAGE_DIR}/web" "${STAGE_DIR}/systemd"
+# No web directory: the portal is embedded in the server binary.
+mkdir -p "${STAGE_DIR}/bin" "${STAGE_DIR}/systemd"
 install -m 0755 "${PROJECT_DIR}/dist/bin/releasedock-server" "${STAGE_DIR}/bin/releasedock-server"
 install -m 0755 "${PROJECT_DIR}/dist/bin/releasedock-runner" "${STAGE_DIR}/bin/releasedock-runner"
 install -m 0755 "${PROJECT_DIR}/dist/bin/releasedock-executor" "${STAGE_DIR}/bin/releasedock-executor"
-cp -a "${PROJECT_DIR}/dist/web/." "${STAGE_DIR}/web/"
 install -m 0755 "${PROJECT_DIR}/deploy/install.sh" "${STAGE_DIR}/install.sh"
 install -m 0755 "${PROJECT_DIR}/deploy/rollback.sh" "${STAGE_DIR}/rollback.sh"
 install -m 0755 "${PROJECT_DIR}/deploy/releasedock.sh" "${STAGE_DIR}/releasedock.sh"

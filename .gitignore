@@ -28,3 +28,7 @@
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Built portal staged into the server binary by scripts/build.sh.
+/backend/internal/webassets/assets/*
+!/backend/internal/webassets/assets/.gitkeep

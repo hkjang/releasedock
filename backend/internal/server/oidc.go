@@ -36,7 +36,7 @@ type oidcSettings struct {
 	// AllowInsecureEndpoints permits plaintext HTTP OIDC endpoints, but only to
 	// non-public hosts. Needed for air-gapped Keycloak without TLS.
 	AllowInsecureEndpoints bool
-	DefaultRoleID   *string
+	DefaultRoleID          *string
 }
 
 type oidcDiscovery struct {
@@ -61,7 +61,6 @@ func loadOIDCWithQueryer(ctx context.Context, queryer dependencyQueryer, forUpda
 		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.AllowInsecureEndpoints, &cfg.DefaultRoleID)
 	return cfg, err
 }
-
 
 // oidcCallbackPath is fixed by the route table, so the redirect URI only ever
 // varies by origin.

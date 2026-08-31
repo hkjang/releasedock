@@ -247,7 +247,7 @@ func (s *Server) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		// What the server will actually send, so an administrator can register
 		// it in Keycloak without configuring it here.
 		"effectiveRedirectUri": s.resolveOIDCRedirectURI(r.Context(), r, cfg),
-		"scopes": strings.Join(cfg.Scopes, " "), "autoProvision": cfg.AutoCreateUser, "defaultRoleId": cfg.DefaultRoleID,
+		"scopes":               strings.Join(cfg.Scopes, " "), "autoProvision": cfg.AutoCreateUser, "defaultRoleId": cfg.DefaultRoleID,
 		"verifyTls": true, "usernameClaim": "preferred_username", "groupsClaim": "groups",
 	})
 }

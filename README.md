@@ -8,6 +8,7 @@ ReleaseDock는 폐쇄망에서 운영하는 Release Orchestrator / Deployment Ga
 - `runner/`: PostgreSQL job queue/Harbor 실행기와 secret 없는 승인 Script executor
 - `web/`: React + TypeScript + MUI 운영 포털
 - `deploy/`: systemd 기반 폐쇄망 설치 자산과 standalone 제어 스크립트 (`releasedock.sh`)
+- `backend/internal/webassets/`: 서버 바이너리에 포털을 내장하는 embed 지점 (빌드 시 채워지며 커밋하지 않음)
 - `scripts/`: 재현 가능한 빌드와 릴리즈 패키징
 - `docs/`: 아키텍처, 보안 모델, API 및 운영 문서
 
@@ -81,7 +82,13 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 ## Standalone 기동
 
-systemd 없이 바로 띄우려면 패키지의 `releasedock.sh` 를 사용합니다. 평가 환경이나 심플 모드만 쓰는 설치에 적합합니다.
+웹 포털은 서버 바이너리에 내장되어 있습니다. 따라서 **실행 파일 하나와 환경 파일 하나**만 있으면 심플 모드가 완전히 동작하며, 별도의 `web/` 디렉터리가 필요하지 않습니다.
+
+```bash
+./bin/releasedock-server          # 이것만으로 API + 웹 포털이 뜹니다
+```
+
+systemd 없이 기동·종료·재기동을 하려면 패키지의 `releasedock.sh` 를 사용합니다.
 
 ```bash
 ./releasedock.sh doctor     # 환경 진단 (실패가 있으면 종료 코드 1)
@@ -102,7 +109,7 @@ systemd 없이 바로 띄우려면 패키지의 `releasedock.sh` 를 사용합�
 
 ```bash
 make package
-# release/releasedock-v0.3.3.tar.gz
+# release/releasedock-v0.3.4.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.

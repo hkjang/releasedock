@@ -121,15 +121,21 @@ install -d -o releasedock -g releasedock-workspace -m 0750 "${STATE_DIR}"
 install -d -o releasedock -g releasedock -m 0750 "${STATE_DIR}/artifacts" "${LOG_DIR}"
 install -d -o releasedock-runner -g releasedock-workspace -m 2750 "${STATE_DIR}/workspaces"
 install -d -o root -g releasedock -m 0750 "${CONFIG_DIR}"
-install -d -o root -g root -m 0755 "${STAGING_DIR}/bin" "${STAGING_DIR}/web"
+install -d -o root -g root -m 0755 "${STAGING_DIR}/bin"
 
 install -o root -g root -m 0755 "${PACKAGE_DIR}/bin/releasedock-server" "${STAGING_DIR}/bin/releasedock-server"
 install -o root -g root -m 0755 "${PACKAGE_DIR}/bin/releasedock-runner" "${STAGING_DIR}/bin/releasedock-runner"
 install -o root -g root -m 0755 "${PACKAGE_DIR}/bin/releasedock-executor" "${STAGING_DIR}/bin/releasedock-executor"
-cp -a "${PACKAGE_DIR}/web/." "${STAGING_DIR}/web/"
-chown -R root:root "${STAGING_DIR}/web"
-find "${STAGING_DIR}/web" -type d -exec chmod 0755 {} +
-find "${STAGING_DIR}/web" -type f -exec chmod 0644 {} +
+# The portal is embedded in the server binary, so a package no longer needs
+# to carry it. A directory is still installed when present, which keeps
+# older packages installable and allows RELEASEDOCK_WEB_ROOT to point at it.
+if [[ -f "${PACKAGE_DIR}/web/index.html" ]]; then
+	install -d -o root -g root -m 0755 "${STAGING_DIR}/web"
+	cp -a "${PACKAGE_DIR}/web/." "${STAGING_DIR}/web/"
+	chown -R root:root "${STAGING_DIR}/web"
+	find "${STAGING_DIR}/web" -type d -exec chmod 0755 {} +
+	find "${STAGING_DIR}/web" -type f -exec chmod 0644 {} +
+fi
 install -o root -g root -m 0644 "${PACKAGE_DIR}/VERSION" "${STAGING_DIR}/VERSION"
 install -o root -g root -m 0644 "${PACKAGE_DIR}/README.md" "${STAGING_DIR}/README.md"
 

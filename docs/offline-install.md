@@ -27,10 +27,10 @@ Runtime binary는 종류별 `docker`/`podman`/`ctr` 이름과 `/usr/bin`, `/usr/
 ## 반입 검증
 
 ```bash
-sha256sum -c releasedock-v0.3.3.tar.gz.sha256
-tar -tzf releasedock-v0.3.3.tar.gz
-tar -xzf releasedock-v0.3.3.tar.gz
-cd releasedock-v0.3.3
+sha256sum -c releasedock-v0.3.4.tar.gz.sha256
+tar -tzf releasedock-v0.3.4.tar.gz
+tar -xzf releasedock-v0.3.4.tar.gz
+cd releasedock-v0.3.4
 sudo ./install.sh
 ```
 
@@ -57,12 +57,30 @@ PORT=8080
 
 bootstrap password는 최초 로그인 후 변경합니다. 이후 환경 파일에서 `BOOTSTRAP_ADMIN_PASSWORD` 값을 제거하면 안 됩니다(허용 환경 변수 계약은 유지되지만 재부팅 때 사용되지는 않습니다). 운영에서는 systemd credential 또는 root-only 파일로 환경 파일 자체를 보호하십시오.
 
+## 웹 포털 내장
+
+웹 포털은 `releasedock-server` 바이너리에 내장되어 있습니다. 패키지에 별도의 `web/` 디렉터리가 없고, 실행 파일 하나로 API 와 화면을 모두 제공합니다.
+
+자산 선택 순서는 다음과 같습니다.
+
+1. `RELEASEDOCK_WEB_ROOT` 환경 변수로 지정한 디렉터리 — 재빌드 없이 화면을 교체해야 할 때만 사용합니다.
+2. 바이너리에 내장된 사본 — 기본값입니다.
+3. 실행 파일 옆에서 발견한 `web/` 또는 `web/dist/` — 개발 중 `go run` 을 위한 경로입니다.
+
+기동 로그의 `source` 값으로 무엇이 선택됐는지 확인할 수 있습니다.
+
+```text
+level=INFO msg="serving web assets" source=embedded
+```
+
+`install.sh` 는 패키지에 `web/` 이 있으면 계속 설치하므로 v0.3.4 이전 패키지도 그대로 설치됩니다.
+
 ## Standalone 기동 (systemd 없이)
 
 패키지에 포함된 `releasedock.sh` 로 systemd 없이 바로 띄울 수 있습니다. 평가 환경이나 심플 모드만 사용하는 설치에 적합합니다.
 
 ```bash
-cd releasedock-v0.3.3
+cd releasedock-v0.3.4
 cp releasedock.env.example releasedock.env   # 값을 채웁니다
 chmod 600 releasedock.env
 
@@ -94,7 +112,7 @@ chmod 600 releasedock.env
 
 | 구분 | 확인 내용 |
 | --- | --- |
-| 실행 파일 | server/runner/executor 존재와 실행 권한, 웹 자산 |
+| 실행 파일 | server/runner/executor 존재와 실행 권한, 웹 자산 위치 |
 | 환경 설정 | 환경 파일 권한, 필수 변수, ENCRYPTION_KEY 32바이트, PORT 범위, 예제 값이 그대로인지 |
 | 포트 | PORT 사용 여부와 점유 프로세스 |
 | 데이터 경로 | `/var/lib/releasedock` 이하 존재·심볼릭 링크·쓰기 권한, run/log 경로 |

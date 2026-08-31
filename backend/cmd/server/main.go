@@ -58,13 +58,18 @@ func main() {
 		logger.Error("secret vault initialization failed", "error", err)
 		os.Exit(1)
 	}
-	webRoot := server.FindWebRoot()
-	if webRoot == "" {
+	// RELEASEDOCK_WEB_ROOT lets an operator point at a directory of assets
+	// instead of the copy embedded in this binary, which is useful when
+	// patching the portal without a rebuild. Everything else about the
+	// service is configured in the database, so this stays deliberately
+	// undocumented as a normal setting.
+	webRoot := os.Getenv("RELEASEDOCK_WEB_ROOT")
+	app := server.New(st, vault, logger, server.BuildInfo{Version: version, Commit: commit, BuildTime: buildTime}, webRoot)
+	if origin := app.WebOrigin(); origin == "" {
 		logger.Warn("web assets not found; API-only mode enabled")
 	} else {
-		logger.Info("serving web assets", "root", webRoot)
+		logger.Info("serving web assets", "source", origin)
 	}
-	app := server.New(st, vault, logger, server.BuildInfo{Version: version, Commit: commit, BuildTime: buildTime}, webRoot)
 	// Simple-mode commands run inside this process, so anything still marked
 	// running belongs to a previous process whose children are already gone.
 	app.RecoverSimpleRuns(ctx)

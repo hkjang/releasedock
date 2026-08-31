@@ -52,6 +52,22 @@ fi
   VITE_RELEASEDOCK_VERSION="${VERSION}" npm run build
 )
 
+# Stage the built portal into the embed directory so the server binary is
+# self-contained. The tree is emptied again afterwards so a later plain
+# `go build` produces a development binary that reads assets from disk,
+# and so nothing built ever lands in version control.
+EMBED_DIR="${PROJECT_DIR}/backend/internal/webassets/assets"
+reset_embed() {
+	# No `set +e` here: shell options are not function-scoped, and this is
+	# called inline, so disabling errexit would silently let the rest of the
+	# build ignore failing tests.
+	find "${EMBED_DIR}" -mindepth 1 ! -name .gitkeep -delete 2>/dev/null || true
+}
+trap 'cleanup_web_build; reset_embed' EXIT
+reset_embed
+cp -a "${WEB_BUILD_ROOT}/dist/." "${EMBED_DIR}/"
+test -f "${EMBED_DIR}/index.html" || { echo "embedded web assets are missing index.html" >&2; exit 1; }
+
 (
   cd "${PROJECT_DIR}/backend"
   go test ./...
@@ -76,5 +92,6 @@ cp -a "${WEB_BUILD_ROOT}/dist" "${BUILD_DIR}/web"
 printf '%s\n' "${VERSION}" > "${BUILD_DIR}/VERSION"
 
 trap - EXIT
+reset_embed
 cleanup_web_build
 echo "Built ReleaseDock ${VERSION} in ${BUILD_DIR}"

@@ -205,10 +205,12 @@ check_binaries() {
       bad "releasedock-${service} 없음: ${binary}"
     fi
   done
+  # Assets are embedded in the server binary; a directory beside it is only
+  # an optional override target and is not required.
   if [[ -f "${ROOT_DIR}/web/index.html" ]]; then
-    ok "웹 자산 (${ROOT_DIR}/web)"
+    info "웹 자산 디스크 사본이 있습니다 (${ROOT_DIR}/web). 기본값은 바이너리 내장본이며, RELEASEDOCK_WEB_ROOT 로 지정할 때만 이 사본을 씁니다."
   else
-    warn "웹 자산을 찾지 못했습니다. API 전용 모드로 동작합니다."
+    info "웹 자산은 서버 바이너리에 내장되어 있습니다. 기동 로그의 source 값으로 확인하십시오."
   fi
 }
 
