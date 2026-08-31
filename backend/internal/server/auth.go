@@ -255,11 +255,14 @@ func (s *Server) updatePreferences(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_preferences", "preferences must be a JSON object no larger than 64 KiB")
 		return
 	}
-	_, err = s.store.Pool.Exec(r.Context(), `UPDATE users SET preferences=$2,updated_at=now() WHERE id=$1`, p.UserID, encoded)
+	// PATCH merges: a caller that sets one key must not silently drop the rest.
+	var merged json.RawMessage
+	err = s.store.Pool.QueryRow(r.Context(), `UPDATE users SET preferences=preferences||$2,updated_at=now() WHERE id=$1 RETURNING preferences`, p.UserID, encoded).Scan(&merged)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not update preferences")
 		return
 	}
+	_ = json.Unmarshal(merged, &input)
 	s.store.Audit(r.Context(), p.UserID, "profile.preferences.update", "user", p.UserID, "success", remoteIP(r), r.UserAgent(), nil)
 	writeJSON(w, http.StatusOK, map[string]any{"preferences": input})
 }

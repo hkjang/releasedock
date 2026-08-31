@@ -59,11 +59,23 @@ SUCCESS/FAILED -> PENDING_REVIEW -> APPROVED -> VALIDATING(source image digest/r
 - script template/version/timeout
 - approval 사용 여부, 보호 환경, 자기 승인과 반려 사유 정책
 - AI endpoint/model/API key/max tokens(최대 262,144)/timeout
+- 심플 모드 기본 화면 모드, 업로드 루트, 명령 지정 방식(서비스별/공통)과 공통 명령
+- 관리 API 출발지 IP 허용 목록과 신뢰하는 리버스 프록시 CIDR
 - health check와 수동 rollback 정책(`autoRollback`은 안전한 이전 배포 head snapshot이 없는 v0.1에서 비활성화)
 
 secret 필드는 AES-256-GCM으로 암호화하며 secret 종류 또는 credential ID/version을 additional authenticated data로 묶습니다. 개인 API key는 생성·회전 시에만 원문을 반환하고 DB에는 prefix와 고엔트로피 토큰의 SHA-256 digest만 저장합니다.
 
 배포 대상 credential은 Job에 ID/version snapshot만 저장합니다. Runner가 Script 직전에만 복호화해 tmpfs 기반 `/run/releasedock-credentials/job-<job-id>/credential`의 Runner 소유 `0640` handoff로 만들고, executor는 소유권·group·mode·symlink 부재를 검증한 뒤 전용 `/run/releasedock-executor-private`의 executor 소유 `0600` 파일로 복사하여 그 path/type만 Script 환경에 전달합니다. Registry auth와 containerd hosts도 같은 Runner RuntimeDirectory의 Job 경로에 둡니다. 양쪽 임시 파일은 오류/timeout을 포함한 모든 종료 경로에서 지우고, systemd RuntimeDirectory lifecycle 및 startup scavenger가 SIGKILL/재시작/전원장애 경로를 보완합니다. stdout/stderr에 그대로 출력된 plaintext는 chunk 경계를 넘어 redaction합니다. 단, 승인 Script는 credential을 실제 대상에 사용할 수 있는 신뢰 코드이므로 인코딩·변형·외부 전송까지 막는 DLP 경계는 아닙니다.
+
+## 심플 모드 경계
+
+심플 모드는 위 신뢰 경계를 사용하지 않습니다. API 프로세스가 업로드를 대상 디렉터리에 저장하고 관리자가 등록한 명령을 자기 프로세스에서 직접 실행하며, Runner와 executor를 거치지 않습니다. Harbor, 배포 대상 credential, container runtime도 사용하지 않습니다.
+
+실행 가드는 `backend/internal/localexec`에 있으며 executor와 동일합니다. 절대 경로의 실행 가능한 일반 파일만 허용하고, 셸 없이 `exec.CommandContext`에 인자 배열을 전달하며, 환경변수는 allowlist만 넘기고, 제한 시간 초과 시 `Setpgid`로 만든 프로세스 그룹 전체를 SIGKILL로 정리합니다. 명령 경로와 인자는 관리자 설정에서만 오고 요청 본문에서는 절대 오지 않습니다.
+
+대상당 동시 실행 1건은 `simple_runs`의 부분 유니크 인덱스로, 실행 이력의 불변성은 종료 상태 전이를 막는 트리거로 강제합니다. 명령은 실행 시점에 활성 설정에서 결정한 뒤 `simple_runs`에 스냅샷으로 고정하므로 이후 설정 변경이 과거 이력을 바꾸지 않습니다. 프로세스가 재시작되면 자식도 함께 사라지므로 부팅 시 미완료 실행을 `FAILED`로 마감합니다.
+
+관리 API는 출발지 IP 허용 목록으로 추가 제한할 수 있습니다. 검사는 라우트마다가 아니라 permission 미들웨어에서 수행하므로 이후 추가되는 관리 라우트도 자동으로 포함됩니다. 리버스 프록시 뒤에서는 신뢰 프록시 CIDR에 속한 peer의 요청에 한해 `X-Forwarded-For`를 오른쪽부터 해석하고, 신뢰 프록시가 아닌 첫 주소를 클라이언트로 채택합니다.
 
 ## API와 MCP
 

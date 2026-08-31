@@ -47,6 +47,7 @@ import {
 import { alpha, useTheme } from '@mui/material/styles';
 import { useEffect, useMemo, useState, type ElementType, type MouseEvent } from 'react';
 import { Link as RouterLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useUiMode } from '../app/UiModeContext';
 import { useVersion } from '../app/VersionContext';
 import { useAuth } from '../auth/AuthContext';
 import { drawerWidth } from '../theme';
@@ -65,6 +66,38 @@ interface NavSection {
   adminOnly?: boolean;
 }
 
+// Simple mode deliberately exposes only the two screens it needs, plus the
+// simple-mode administration a full-mode operator would otherwise have to go
+// looking for. Everything else stays hidden until the user switches modes.
+const simpleSections: NavSection[] = [
+  {
+    id: 'workspace',
+    label: '배포',
+    items: [
+      { label: '배포', path: '/simple', icon: PlaylistAddRoundedIcon, permission: 'simple.deploy' },
+      { label: '실행 기록', path: '/simple/runs', icon: HistoryRoundedIcon, permission: 'simple.read' },
+    ],
+  },
+  {
+    id: 'admin',
+    label: '관리',
+    adminOnly: true,
+    items: [
+      { label: '심플 대상', path: '/admin/simple-targets', icon: DnsRoundedIcon, permission: 'admin.simple.read' },
+      { label: '심플 모드 설정', path: '/admin/settings/simple', icon: TuneRoundedIcon, permission: 'admin.simple.read' },
+      { label: '관리자 접근 IP', path: '/admin/settings/network', icon: LanRoundedIcon, permission: 'admin.settings.read' },
+      { label: '사용자', path: '/admin/users', icon: PersonRoundedIcon, permission: 'admin.users.read' },
+      { label: 'Keycloak OIDC', path: '/admin/settings/oidc', icon: LanRoundedIcon, permission: 'admin.settings.read' },
+      { label: '감사 로그', path: '/admin/audit', icon: HistoryRoundedIcon, permission: 'audit.read' },
+    ],
+  },
+  {
+    id: 'personal',
+    label: '개인화',
+    items: [{ label: '내 프로필', path: '/personal/profile', icon: BadgeRoundedIcon }],
+  },
+];
+
 const sections: NavSection[] = [
   {
     id: 'workspace',
@@ -73,6 +106,7 @@ const sections: NavSection[] = [
       { label: '대시보드', path: '/', icon: DashboardRoundedIcon, permission: 'releases.read' },
       { label: '릴리즈', path: '/releases', icon: RocketLaunchRoundedIcon, permission: 'releases.read' },
       { label: '새 버전 배포', path: '/releases/new', icon: PlaylistAddRoundedIcon, permission: 'releases.create' },
+      { label: '심플 배포', path: '/simple', icon: DnsRoundedIcon, permission: 'simple.deploy' },
     ],
   },
   {
@@ -97,6 +131,9 @@ const sections: NavSection[] = [
       { label: '사용자', path: '/admin/users', icon: PersonRoundedIcon, permission: 'admin.users.read' },
       { label: '역할 및 권한', path: '/admin/roles', icon: AdminPanelSettingsRoundedIcon, permission: 'admin.rbac.read' },
       { label: '감사 로그', path: '/admin/audit', icon: HistoryRoundedIcon, permission: 'audit.read' },
+      { label: '심플 대상', path: '/admin/simple-targets', icon: DnsRoundedIcon, permission: 'admin.simple.read' },
+      { label: '심플 모드 설정', path: '/admin/settings/simple', icon: TuneRoundedIcon, permission: 'admin.simple.read' },
+      { label: '관리자 접근 IP', path: '/admin/settings/network', icon: LanRoundedIcon, permission: 'admin.settings.read' },
     ],
   },
   {
@@ -153,20 +190,22 @@ function Logo() {
 function Navigation({ onNavigate }: { onNavigate: () => void }) {
   const { pathname } = useLocation();
   const { hasPermission } = useAuth();
+  const { mode } = useUiMode();
   const [expanded, setExpanded] = useState(initialExpanded);
+  const activeSections = mode === 'simple' ? simpleSections : sections;
 
   useEffect(() => {
     window.localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
   }, [expanded]);
 
   useEffect(() => {
-    const matchingSection = sections.find((section) => section.items.some((item) => pathname === item.path || (item.path !== '/' && pathname.startsWith(`${item.path}/`))));
+    const matchingSection = activeSections.find((section) => section.items.some((item) => pathname === item.path || (item.path !== '/' && pathname.startsWith(`${item.path}/`))));
     if (matchingSection) setExpanded((current) => ({ ...current, [matchingSection.id]: true }));
-  }, [pathname]);
+  }, [pathname, activeSections]);
 
   return (
     <Box component="nav" aria-label="주 메뉴" sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 1.25, py: 1.5 }}>
-      {sections.map((section) => ({ ...section, items: section.items.filter((item) => !item.permission || hasPermission(item.permission)) })).filter((section) => section.items.length > 0).map((section) => (
+      {activeSections.map((section) => ({ ...section, items: section.items.filter((item) => !item.permission || hasPermission(item.permission)) })).filter((section) => section.items.length > 0).map((section) => (
         <Box key={section.id} sx={{ mb: 1 }}>
           <ListItemButton
             onClick={() => setExpanded((current) => ({ ...current, [section.id]: !current[section.id] }))}
@@ -233,6 +272,7 @@ export function AppShell() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null);
   const { user, logout, hasPermission } = useAuth();
+  const { mode, canUseSimple, canUseFull, setMode } = useUiMode();
   const version = useVersion();
   const navigate = useNavigate();
 
@@ -329,6 +369,22 @@ export function AppShell() {
                 <ListItemIcon><KeyRoundedIcon fontSize="small" /></ListItemIcon>
                 API 키 관리
               </MenuItem>
+            )}
+            {canUseSimple && canUseFull && (
+              <>
+                <Divider />
+                <MenuItem
+                  onClick={() => {
+                    closeProfile();
+                    void setMode(mode === 'simple' ? 'full' : 'simple');
+                    navigate(mode === 'simple' ? '/' : '/simple');
+                  }}
+                  sx={{ minHeight: 46 }}
+                >
+                  <ListItemIcon><TuneRoundedIcon fontSize="small" /></ListItemIcon>
+                  {mode === 'simple' ? '전체 모드로 전환' : '심플 모드로 전환'}
+                </MenuItem>
+              </>
             )}
             <Divider />
             <Box sx={{ px: 2, py: 1.25 }}>

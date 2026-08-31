@@ -27,10 +27,10 @@ Runtime binary는 종류별 `docker`/`podman`/`ctr` 이름과 `/usr/bin`, `/usr/
 ## 반입 검증
 
 ```bash
-sha256sum -c releasedock-v0.2.0.tar.gz.sha256
-tar -tzf releasedock-v0.2.0.tar.gz
-tar -xzf releasedock-v0.2.0.tar.gz
-cd releasedock-v0.2.0
+sha256sum -c releasedock-v0.3.0.tar.gz.sha256
+tar -tzf releasedock-v0.3.0.tar.gz
+tar -xzf releasedock-v0.3.0.tar.gz
+cd releasedock-v0.3.0
 sudo ./install.sh
 ```
 

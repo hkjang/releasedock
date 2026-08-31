@@ -162,7 +162,46 @@ export interface QuickReleaseInput {
 
 type WireValue = Record<string, unknown>;
 
-type SettingSection = 'general' | 'oidc' | 'ai' | 'approval' | 'storage' | 'runner';
+type SettingSection = 'general' | 'oidc' | 'ai' | 'approval' | 'storage' | 'runner' | 'simple' | 'network';
+
+export interface UiModeInfo {
+  defaultUiMode: 'simple' | 'full';
+  preferredUiMode: '' | 'simple' | 'full';
+  effectiveUiMode: 'simple' | 'full';
+  canUseSimple: boolean;
+  canUseFull: boolean;
+  commandMode: 'PER_TARGET' | 'SHARED';
+}
+
+export interface SimpleTarget {
+  id: string;
+  name: string;
+  description: string;
+  uploadDir: string;
+  maxUploadBytes: number;
+  ready: boolean;
+  notReadyReason: string;
+}
+
+export interface SimpleRun {
+  id: string;
+  targetName: string;
+  filename: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
+  exitCode: number | null;
+  commandSource: 'PER_TARGET' | 'SHARED';
+  commandPath: string;
+  commandArgs?: string[];
+  sizeBytes: number;
+  error?: string;
+  storedPath?: string;
+  sha256?: string;
+  timeoutSeconds?: number;
+  actorName?: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
 
 function normalizeSettings(section: SettingSection, value: SettingValue): SettingValue {
   if (section === 'general') {
@@ -194,7 +233,7 @@ function normalizeSettings(section: SettingSection, value: SettingValue): Settin
       defaultRole: typeof role === 'string' ? role.replace(/^role-/, '') : role,
     };
   }
-  if (section === 'runner') return value;
+  if (section === 'runner' || section === 'simple' || section === 'network') return value;
   return {
     ...value,
     enabled: value.enabled,
@@ -236,6 +275,25 @@ function serializeSettings(section: SettingSection, value: SettingValue): Settin
       heartbeatIntervalMs: Number(value.heartbeatIntervalMs),
       staleJobAfterMs: Number(value.staleJobAfterMs),
       logChunkBytes: Number(value.logChunkBytes),
+    };
+  }
+  if (section === 'simple') {
+    return {
+      defaultUiMode: value.defaultUiMode,
+      commandMode: value.commandMode,
+      sharedCommandPath: String(value.sharedCommandPath ?? ''),
+      sharedCommandArgs: String(value.sharedCommandArgs ?? ''),
+      sharedWorkingDir: String(value.sharedWorkingDir ?? ''),
+      sharedTimeoutSeconds: Number(value.sharedTimeoutSeconds ?? 600),
+      uploadRoot: String(value.uploadRoot ?? ''),
+    };
+  }
+  if (section === 'network') {
+    // callerIp is server-derived and must not be echoed back.
+    return {
+      adminIpAllowlistEnabled: Boolean(value.adminIpAllowlistEnabled),
+      adminIpAllowlist: String(value.adminIpAllowlist ?? ''),
+      trustedProxyCidrs: String(value.trustedProxyCidrs ?? ''),
     };
   }
   if (section === 'oidc') {
@@ -410,6 +468,20 @@ export const api = {
     }));
     return { items, page, pageSize: response.pageSize ?? pageSize, total: response.total ?? ((page - 1) * pageSize + items.length) };
   },
+
+  uiMode: () => request<UiModeInfo>('/ui-mode'),
+  setPreferredUiMode: (mode: 'simple' | 'full') =>
+    request<void>('/me/preferences', { method: 'PATCH', body: { uiMode: mode } }),
+  simpleTargets: () => request<{ items: SimpleTarget[]; commandMode: string }>('/simple/targets'),
+  simpleRuns: (params: ListParams = {}, mine = false) =>
+    request<PageResult<SimpleRun>>(`/simple/runs${toListQuery(params)}${mine ? (toListQuery(params) ? '&' : '?') + 'mine=true' : ''}`),
+  simpleRun: (id: string) => request<SimpleRun>(`/simple/runs/${encodeURIComponent(id)}`),
+  startSimpleRun: (targetId: string, artifact: File) => {
+    const form = new FormData();
+    form.set('artifact', artifact);
+    return request<SimpleRun>(`/simple/targets/${encodeURIComponent(targetId)}/runs`, { method: 'POST', body: form });
+  },
+  simpleRunLogStreamUrl: (id: string) => `${API_BASE}/simple/runs/${encodeURIComponent(id)}/logs/stream`,
 
   updateProfile: (values: Partial<User>) => request<User>('/me/profile', { method: 'PUT', body: values }),
 	changePassword: (currentPassword: string, newPassword: string) =>

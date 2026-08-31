@@ -22,6 +22,9 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
+# Simple-mode upload directories live under /var/lib/releasedock/simple, which
+# this entry already covers. Pointing simple mode at any other location
+# requires adding that path here as well.
 ReadWritePaths=/var/lib/releasedock /var/log/releasedock
 # Artifacts are 0640 so the separate Runner account can read them via the
 # shared releasedock group; secrets remain encrypted in PostgreSQL.

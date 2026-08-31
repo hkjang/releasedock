@@ -106,6 +106,22 @@ export const resourceConfigs = {
     columns: [{ key: 'name', label: '서비스' }, { key: 'artifactPrefix', label: '파일명 접두어' }, { key: 'applicationName', label: '애플리케이션' }, { key: 'environmentName', label: '배포 대상' }, { key: 'deploymentProfileName', label: '운영 정책' }, { key: 'autoDeployAfterApproval', label: '승인 후 자동 시작', status: true }, { key: 'active', label: '상태', status: true }],
     fields: [{ key: 'name', label: '사용자 표시 이름', required: true, helperText: '예: AI Portal 운영' }, { key: 'artifactPrefix', label: '파일명 접두어', required: true, pattern: /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/, helperText: '1~64자의 영문 소문자·숫자·내부 하이픈만 사용합니다. 예: ai-portal' }, { key: 'applicationId', label: '애플리케이션', required: true, relation: 'applications' }, { key: 'environmentId', label: '배포 대상', required: true, relation: 'environments' }, { key: 'deploymentProfileId', label: '운영 정책', required: true, relation: 'profiles', helperText: '선택한 서비스와 배포 대상에 맞는 정책만 표시됩니다.' }, { key: 'autoDeployAfterApproval', label: '승인 후 자동으로 배포 시작', type: 'boolean', defaultValue: true }, { key: 'active', label: '활성화', type: 'boolean', defaultValue: true }],
   },
+  simpleTargets: {
+    title: '심플 대상', description: '심플 모드에서 사용자가 고를 배포 대상입니다. 업로드 경로와 실행할 명령을 지정합니다.', singular: '심플 대상', endpoint: '/admin/simple-targets',
+    writePermission: 'admin.simple.write',
+    columns: [{ key: 'name', label: '이름' }, { key: 'uploadDir', label: '업로드 경로' }, { key: 'commandPath', label: '실행 명령' }, { key: 'timeoutSeconds', label: '제한 시간(초)' }, { key: 'active', label: '상태', status: true }],
+    fields: [
+      { key: 'name', label: '사용자 표시 이름', required: true, helperText: '예: AI 포털 운영' },
+      { key: 'description', label: '설명', type: 'multiline' },
+      { key: 'uploadDir', label: '업로드 경로', required: true, helperText: '패키지를 저장할 절대 경로입니다. 심플 설정의 업로드 루트 하위여야 합니다. 예: /var/lib/releasedock/simple/ai-portal' },
+      { key: 'commandPath', label: '실행 명령 절대 경로', helperText: '공통 명령 모드에서는 사용되지 않습니다. 예: /opt/deploy/ai-portal.sh' },
+      { key: 'commandArgs', label: '명령 인자', type: 'multiline', helperText: '한 줄에 인자 하나입니다. {{artifact}}는 업로드한 파일의 절대 경로로 바뀝니다. 셸을 거치지 않으므로 인자 안의 특수문자는 그대로 전달됩니다.' },
+      { key: 'workingDir', label: '작업 디렉터리', helperText: '비우면 업로드 경로에서 실행합니다.' },
+      { key: 'timeoutSeconds', label: '제한 시간(초)', type: 'number', defaultValue: 600, helperText: '1~86400. 초과하면 자식 프로세스까지 함께 종료합니다.' },
+      { key: 'maxUploadBytes', label: '최대 업로드 크기(byte)', type: 'number', defaultValue: 10737418240, helperText: '기본 10 GiB.' },
+      { key: 'active', label: '활성화', type: 'boolean', defaultValue: true },
+    ],
+  },
   scripts: {
     title: '스크립트 템플릿', description: 'Runner에서 허용 목록으로 실행할 버전 관리 스크립트를 관리합니다.', singular: '스크립트', endpoint: '/admin/scripts',
     writePermission: 'admin.scripts.write',

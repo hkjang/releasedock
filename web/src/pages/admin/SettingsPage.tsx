@@ -31,7 +31,7 @@ import { PageHeader } from '../../components/PageHeader';
 import { useAsync } from '../../hooks/useAsync';
 import type { SettingValue } from '../../types/domain';
 
-export type SettingSection = 'general' | 'oidc' | 'ai' | 'approval' | 'storage' | 'runner';
+export type SettingSection = 'general' | 'oidc' | 'ai' | 'approval' | 'storage' | 'runner' | 'simple' | 'network';
 
 const metadata: Record<SettingSection, { title: string; description: string; icon: typeof SettingsRoundedIcon }> = {
   general: { title: '일반 설정', description: '서비스 표시, 업로드 제한과 외부 API 보안 정책을 관리합니다.', icon: SettingsRoundedIcon },
@@ -40,6 +40,8 @@ const metadata: Record<SettingSection, { title: string; description: string; ico
   approval: { title: '검토 및 승인 정책', description: '팀장 검토가 필요한 환경과 승인·반려 흐름을 선택적으로 적용합니다.', icon: SecurityRoundedIcon },
   storage: { title: '아티팩트 스토리지', description: '오프라인망 내 Local 디스크 또는 마운트된 NFS 저장소를 구성합니다.', icon: StorageRoundedIcon },
   runner: { title: 'Runner 설정', description: 'Job polling, lease 복구, heartbeat와 로그 전송 단위를 관리합니다.', icon: MemoryRoundedIcon },
+  simple: { title: '심플 모드', description: '기본 화면 모드와, 서비스별 명령을 쓸지 공통 명령 하나를 쓸지 선택합니다.', icon: SettingsRoundedIcon },
+  network: { title: '관리자 접근 IP', description: '관리 기능을 사용할 수 있는 출발지 IP를 제한합니다.', icon: LanRoundedIcon },
 };
 
 const initialValues: Record<SettingSection, SettingValue> = {
@@ -49,6 +51,8 @@ const initialValues: Record<SettingSection, SettingValue> = {
   approval: { enabled: false, protectedEnvironments: '', allowSelfApproval: false, requireRejectComment: true },
   storage: { driver: 'local', localPath: '/var/lib/releasedock/artifacts' },
   runner: { pollIntervalMs: 2000, lockRetryMs: 5000, settingsRefreshMs: 30000, heartbeatIntervalMs: 5000, staleJobAfterMs: 60000, logChunkBytes: 16384 },
+  simple: { defaultUiMode: 'full', commandMode: 'PER_TARGET', sharedCommandPath: '', sharedCommandArgs: '', sharedWorkingDir: '', sharedTimeoutSeconds: 600, uploadRoot: '/var/lib/releasedock/simple' },
+  network: { adminIpAllowlistEnabled: false, adminIpAllowlist: '', trustedProxyCidrs: '' },
 };
 
 function SettingCard({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
@@ -209,9 +213,107 @@ function RunnerFields({ values, set, disabled }: FieldsProps) {
   );
 }
 
+function SimpleFields({ values, set, disabled }: FieldsProps) {
+  const shared = values.commandMode === 'SHARED';
+  return (
+    <Stack spacing={2.25}>
+      <TextField select label="기본 화면 모드" disabled={disabled} value={String(values.defaultUiMode ?? 'full')} onChange={(e) => set('defaultUiMode', e.target.value)} helperText="로그인한 사용자가 처음 보게 될 화면입니다. 개인이 직접 전환한 경우에는 그 선택이 우선합니다." fullWidth>
+        <MenuItem value="full">전체 모드 (릴리즈 오케스트레이션)</MenuItem>
+        <MenuItem value="simple">심플 모드 (업로드 후 명령 실행)</MenuItem>
+      </TextField>
+
+      <TextField label="업로드 루트" disabled={disabled} value={String(values.uploadRoot ?? '')} onChange={(e) => set('uploadRoot', e.target.value)} helperText="심플 대상의 업로드 경로는 모두 이 경로 하위여야 합니다. /var/lib/releasedock 하위만 허용되며, 다른 위치를 쓰려면 releasedock-server.service의 ReadWritePaths도 함께 바꿔야 합니다." fullWidth />
+
+      <TextField select label="명령 지정 방식" disabled={disabled} value={String(values.commandMode ?? 'PER_TARGET')} onChange={(e) => set('commandMode', e.target.value)} fullWidth
+        helperText={shared
+          ? '모든 대상이 아래 공통 명령 하나를 실행합니다. 대상 이름과 파일 경로는 환경변수로 전달됩니다.'
+          : '심플 대상마다 등록된 명령을 각각 실행합니다.'}>
+        <MenuItem value="PER_TARGET">서비스별 명령 (대상마다 따로 등록)</MenuItem>
+        <MenuItem value="SHARED">공통 명령 하나 (모든 대상 동일)</MenuItem>
+      </TextField>
+
+      <Alert severity={shared ? 'info' : 'success'}>
+        {shared
+          ? '공통 명령 모드입니다. 심플 대상에 등록된 개별 명령은 사용되지 않지만 삭제되지 않으므로, 서비스별 모드로 되돌리면 그대로 다시 적용됩니다.'
+          : '서비스별 명령 모드입니다. 이 모드로 저장하려면 활성 대상 모두에 실행 명령이 설정되어 있어야 합니다.'}
+      </Alert>
+
+      <TextField label="공통 명령 절대 경로" disabled={disabled} required={shared} value={String(values.sharedCommandPath ?? '')} onChange={(e) => set('sharedCommandPath', e.target.value)} placeholder="/opt/deploy/apply.sh" helperText="실행 가능한 일반 파일의 절대 경로여야 합니다." fullWidth />
+      <TextField label="공통 명령 인자" disabled={disabled} value={String(values.sharedCommandArgs ?? '')} onChange={(e) => set('sharedCommandArgs', e.target.value)} multiline minRows={3} helperText="한 줄에 인자 하나입니다. {{artifact}}는 업로드한 파일의 절대 경로로 바뀝니다. 셸을 거치지 않으므로 인자 안의 특수문자는 그대로 전달됩니다." fullWidth />
+      <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
+        <TextField label="공통 작업 디렉터리" disabled={disabled} value={String(values.sharedWorkingDir ?? '')} onChange={(e) => set('sharedWorkingDir', e.target.value)} helperText="비우면 각 대상의 업로드 경로에서 실행합니다." fullWidth />
+        <TextField label="공통 제한 시간 (초)" type="number" disabled={disabled} value={Number(values.sharedTimeoutSeconds ?? 600)} onChange={(e) => set('sharedTimeoutSeconds', Number(e.target.value))} inputProps={{ min: 1, max: 86400 }} fullWidth />
+      </Stack>
+
+      <Alert severity="warning">
+        심플 모드의 명령은 격리된 executor가 아니라 API 서비스 계정으로 직접 실행됩니다. 여기에 등록하는 명령은 그 계정의 권한으로 무엇이든 할 수 있으므로, 신뢰할 수 있는 스크립트만 등록하십시오.
+      </Alert>
+    </Stack>
+  );
+}
+
+function NetworkFields({ values, set, disabled }: FieldsProps) {
+  const enabled = Boolean(values.adminIpAllowlistEnabled);
+  const callerIp = String(values.callerIp ?? '');
+  const allowlist = String(values.adminIpAllowlist ?? '');
+  const alreadyListed = allowlist.split('\n').some((line) => line.trim() === callerIp);
+  return (
+    <Stack spacing={2.25}>
+      <Alert severity={enabled ? 'warning' : 'info'}>
+        {enabled
+          ? '허용 목록에 없는 IP에서는 모든 관리 API가 차단됩니다. 차단된 시도는 감사 로그에 기록됩니다.'
+          : '현재는 IP 제한이 없습니다. 활성화하면 아래 목록의 IP에서만 관리 기능을 사용할 수 있습니다.'}
+      </Alert>
+
+      {Boolean(callerIp) && (
+        <Alert
+          severity={enabled && !alreadyListed ? 'warning' : 'success'}
+          action={!disabled && !alreadyListed ? (
+            <Button size="small" onClick={() => set('adminIpAllowlist', allowlist ? `${allowlist.replace(/\n+$/, '')}\n${callerIp}` : callerIp)}>
+              목록에 추가
+            </Button>
+          ) : undefined}
+        >
+          현재 접속 IP: <strong>{callerIp}</strong>
+          {alreadyListed ? ' (허용 목록에 포함되어 있습니다)' : ' — 이 IP가 목록에 없으면 저장이 거부됩니다.'}
+        </Alert>
+      )}
+
+      <FormControlLabel control={<Switch disabled={disabled} checked={enabled} onChange={(e) => set('adminIpAllowlistEnabled', e.target.checked)} />} label="관리자 접근 IP 제한 활성화" />
+
+      <TextField
+        label="허용 IP / CIDR"
+        disabled={disabled}
+        value={allowlist}
+        onChange={(e) => set('adminIpAllowlist', e.target.value)}
+        multiline
+        minRows={4}
+        fullWidth
+        helperText="한 줄에 하나씩 입력합니다. 단일 주소(10.1.2.3)와 대역(192.168.10.0/24)을 모두 사용할 수 있습니다. 루프백(127.0.0.1, ::1)은 서버 콘솔 복구를 위해 항상 허용됩니다."
+      />
+
+      <TextField
+        label="신뢰하는 리버스 프록시 CIDR"
+        disabled={disabled}
+        value={String(values.trustedProxyCidrs ?? '')}
+        onChange={(e) => set('trustedProxyCidrs', e.target.value)}
+        multiline
+        minRows={2}
+        fullWidth
+        helperText="nginx 등 앞단 프록시를 쓴다면 반드시 입력하십시오. 비워 두면 모든 접속이 프록시 IP로 보여 IP 제한이 의미를 잃습니다. 여기에 등록된 주소에서 온 요청에 한해 X-Forwarded-For를 신뢰합니다."
+      />
+
+      <Alert severity="info" icon={<InfoOutlinedIcon />}>
+        이 제한은 <code>/api/v1/admin/</code> 이하의 모든 관리 API와 <code>admin.</code> 권한을 요구하는 요청에 적용됩니다. 일반 사용자의 배포·조회 기능에는 영향을 주지 않습니다.
+      </Alert>
+    </Stack>
+  );
+}
+
 export function SettingsPage({ section }: { section: SettingSection }) {
   const { hasPermission } = useAuth();
-  const canWrite = hasPermission('admin.settings.write');
+  // Simple mode has its own permission pair; the rest share admin.settings.*.
+  const canWrite = hasPermission(section === 'simple' ? 'admin.simple.write' : 'admin.settings.write');
   const state = useAsync(() => api.getSettings(section), [section]);
   const [values, setValues] = useState<SettingValue>(initialValues[section]);
   const [saving, setSaving] = useState(false);
@@ -258,6 +360,8 @@ export function SettingsPage({ section }: { section: SettingSection }) {
             {section === 'approval' && <ApprovalFields values={values} set={set} disabled={!canWrite} />}
             {section === 'storage' && <StorageFields values={values} set={set} disabled={!canWrite} />}
             {section === 'runner' && <RunnerFields values={values} set={set} disabled={!canWrite} />}
+            {section === 'simple' && <SimpleFields values={values} set={set} disabled={!canWrite} />}
+            {section === 'network' && <NetworkFields values={values} set={set} disabled={!canWrite} />}
           </SettingCard>
         </Stack>
       )}

@@ -46,6 +46,14 @@ type Server struct {
 	aiMu        sync.Mutex
 	aiActive    map[string]int
 	aiTotal     int
+	// Simple mode runs administrator-registered commands inside this process,
+	// so the cap is process-wide rather than per user.
+	simpleMu     sync.Mutex
+	simpleActive int
+	// Admin source-IP allowlist, cached so it stays off the request hot path.
+	networkMu     sync.Mutex
+	networkCache  *networkSettings
+	networkExpiry time.Time
 }
 
 func New(st *store.Store, vault *secure.Vault, logger *slog.Logger, build BuildInfo, webRoot string) *Server {
@@ -197,6 +205,27 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PATCH /api/v1/admin/deployment-presets/{id}", s.withPermission("admin.presets.write", s.updateDeploymentPreset))
 	mux.HandleFunc("PUT /api/v1/admin/deployment-presets/{id}", s.withPermission("admin.presets.write", s.updateDeploymentPreset))
 	mux.HandleFunc("DELETE /api/v1/admin/deployment-presets/{id}", s.withPermission("admin.presets.write", s.deleteDeploymentPreset))
+	// Simple mode: administrators register the upload directory and the command,
+	// users only choose a target and upload a package. Writes are session-only
+	// because registering a command path is equivalent to arbitrary code
+	// execution as the API service account.
+	mux.HandleFunc("GET /api/v1/admin/simple-targets", s.withPermission("admin.simple.read", s.listSimpleTargets))
+	mux.HandleFunc("POST /api/v1/admin/simple-targets", s.withSessionPermission("admin.simple.write", s.createSimpleTarget))
+	mux.HandleFunc("PATCH /api/v1/admin/simple-targets/{id}", s.withSessionPermission("admin.simple.write", s.updateSimpleTarget))
+	mux.HandleFunc("PUT /api/v1/admin/simple-targets/{id}", s.withSessionPermission("admin.simple.write", s.updateSimpleTarget))
+	mux.HandleFunc("DELETE /api/v1/admin/simple-targets/{id}", s.withSessionPermission("admin.simple.write", s.revokeSimpleTarget))
+	mux.HandleFunc("GET /api/v1/admin/settings/network", s.withPermission("admin.settings.read", s.getNetworkSettings))
+	mux.HandleFunc("PUT /api/v1/admin/settings/network", s.withSessionPermission("admin.settings.write", s.putNetworkSettings))
+	mux.HandleFunc("GET /api/v1/admin/settings/simple", s.withPermission("admin.simple.read", s.getSimpleSettings))
+	mux.HandleFunc("PUT /api/v1/admin/settings/simple", s.withSessionPermission("admin.simple.write", s.putSimpleSettings))
+	mux.HandleFunc("GET /api/v1/ui-mode", s.withAuth(s.uiMode))
+	mux.HandleFunc("GET /api/v1/simple/targets", s.withPermission("simple.deploy", s.listUserSimpleTargets))
+	// Starting a run is ordinary user work, so a scoped API key may do it.
+	mux.HandleFunc("POST /api/v1/simple/targets/{id}/runs", s.withPermission("simple.deploy", s.createSimpleRun))
+	mux.HandleFunc("GET /api/v1/simple/runs", s.withPermission("simple.read", s.listSimpleRuns))
+	mux.HandleFunc("GET /api/v1/simple/runs/{id}", s.withPermission("simple.read", s.getSimpleRun))
+	mux.HandleFunc("GET /api/v1/simple/runs/{id}/logs/stream", s.withPermission("simple.read", s.streamSimpleRunLogs))
+
 	mux.HandleFunc("POST /api/v1/runner/heartbeat", s.runnerHeartbeat)
 
 	mux.HandleFunc("GET /api/v1/applications", s.withPermission("applications.read", s.listApplications))
@@ -304,8 +333,18 @@ func (s *Server) withPermission(permission string, next http.HandlerFunc) http.H
 			writeError(w, http.StatusForbidden, "forbidden", "permission required: "+permission)
 			return
 		}
+		// Gating here rather than at each registration means every current and
+		// future administration route inherits the source-IP allowlist.
+		if isAdminRoute(permission, r.URL.Path) {
+			s.withAdminNetwork(next)(w, r)
+			return
+		}
 		next(w, r)
 	})
+}
+
+func isAdminRoute(permission, path string) bool {
+	return strings.HasPrefix(permission, "admin.") || strings.HasPrefix(path, "/api/v1/admin/")
 }
 
 func (s *Server) withSessionPermission(permission string, next http.HandlerFunc) http.HandlerFunc {

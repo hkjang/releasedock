@@ -1,4 +1,4 @@
-import { BrowserRouter, Route, Routes } from 'react-router-dom';
+import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider } from '../auth/AuthContext';
 import { RequireAuth, RequirePermission } from '../auth/RouteGuards';
 import { ErrorBoundary } from '../components/ErrorBoundary';
@@ -14,7 +14,10 @@ import { ReleaseDetailPage } from '../pages/releases/ReleaseDetailPage';
 import { ReleasesPage } from '../pages/releases/ReleasesPage';
 import { NewReleasePage } from '../pages/releases/NewReleasePage';
 import { AdvancedReleasePage } from '../pages/releases/AdvancedReleasePage';
+import { SimpleDeployPage } from '../pages/simple/SimpleDeployPage';
+import { SimpleRunsPage } from '../pages/simple/SimpleRunsPage';
 import { ForbiddenPage, NotFoundPage } from '../pages/SystemPages';
+import { UiModeProvider, useUiMode } from './UiModeContext';
 import { VersionProvider } from './VersionContext';
 
 export function App() {
@@ -23,11 +26,14 @@ export function App() {
       <BrowserRouter>
         <VersionProvider>
           <AuthProvider>
+            <UiModeProvider>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
               <Route element={<RequireAuth />}>
                 <Route element={<AppShell />}>
-                  <Route index element={<RequirePermission permission="releases.read"><DashboardPage /></RequirePermission>} />
+                  <Route index element={<HomeRoute />} />
+                  <Route path="simple" element={<RequirePermission permission="simple.deploy"><SimpleDeployPage /></RequirePermission>} />
+                  <Route path="simple/runs" element={<RequirePermission permission="simple.read"><SimpleRunsPage /></RequirePermission>} />
                   <Route path="releases" element={<RequirePermission permission="releases.read"><ReleasesPage /></RequirePermission>} />
                   <Route path="releases/new" element={<RequirePermission permission="releases.create"><NewReleasePage /></RequirePermission>} />
                   <Route path="releases/new/advanced" element={<RequirePermission permission="releases.create"><RequirePermission permission="applications.read"><RequirePermission permission="profiles.read"><AdvancedReleasePage /></RequirePermission></RequirePermission></RequirePermission>} />
@@ -53,13 +59,30 @@ export function App() {
                   <Route path="admin/settings/approval" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="approval" /></RequirePermission>} />
                   <Route path="admin/settings/storage" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="storage" /></RequirePermission>} />
                   <Route path="admin/settings/runner" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="runner" /></RequirePermission>} />
+                  <Route path="admin/simple-targets" element={<RequirePermission permission="admin.simple.read"><AdminResourcePage config={resourceConfigs.simpleTargets} /></RequirePermission>} />
+                  <Route path="admin/settings/simple" element={<RequirePermission permission="admin.simple.read"><SettingsPage section="simple" /></RequirePermission>} />
+                  <Route path="admin/settings/network" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="network" /></RequirePermission>} />
                   <Route path="*" element={<NotFoundPage />} />
                 </Route>
               </Route>
             </Routes>
+            </UiModeProvider>
           </AuthProvider>
         </VersionProvider>
       </BrowserRouter>
     </ErrorBoundary>
+  );
+}
+
+// HomeRoute sends each user to the landing screen for their active mode, so
+// simple-mode users never see the release dashboard they cannot act on.
+function HomeRoute() {
+  const { mode, loading } = useUiMode();
+  if (loading) return null;
+  if (mode === 'simple') return <Navigate to="/simple" replace />;
+  return (
+    <RequirePermission permission="releases.read">
+      <DashboardPage />
+    </RequirePermission>
   );
 }

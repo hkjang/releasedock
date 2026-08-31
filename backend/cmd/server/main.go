@@ -65,6 +65,9 @@ func main() {
 		logger.Info("serving web assets", "root", webRoot)
 	}
 	app := server.New(st, vault, logger, server.BuildInfo{Version: version, Commit: commit, BuildTime: buildTime}, webRoot)
+	// Simple-mode commands run inside this process, so anything still marked
+	// running belongs to a previous process whose children are already gone.
+	app.RecoverSimpleRuns(ctx)
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           app.Handler(),
