@@ -237,6 +237,9 @@ func (s *Server) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": cfg.Enabled, "issuerUrl": cfg.Issuer, "clientId": cfg.ClientID,
 		"secretConfigured": cfg.ClientSecretEnc != "", "redirectUrl": cfg.RedirectURL,
+		// What the server will actually send, so an administrator can register
+		// it in Keycloak without configuring it here.
+		"effectiveRedirectUri": s.resolveOIDCRedirectURI(r.Context(), r, cfg),
 		"scopes": strings.Join(cfg.Scopes, " "), "autoProvision": cfg.AutoCreateUser, "defaultRoleId": cfg.DefaultRoleID,
 		"verifyTls": true, "usernameClaim": "preferred_username", "groupsClaim": "groups",
 	})
@@ -313,14 +316,19 @@ func (s *Server) updateOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if current.Enabled {
-		if current.ClientID == "" || current.RedirectURL == "" || secretEnc == "" || !contains(current.Scopes, "openid") {
-			writeError(w, 400, "invalid_oidc_settings", "enabled OIDC requires issuer, client_id, client_secret, redirect_url, and openid scope")
+		if current.ClientID == "" || secretEnc == "" || !contains(current.Scopes, "openid") {
+			writeError(w, 400, "invalid_oidc_settings", "enabled OIDC requires issuer, client_id, client_secret, and openid scope")
 			return
 		}
-		redirect, parseErr := url.Parse(current.RedirectURL)
-		if parseErr != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" {
-			writeError(w, 400, "invalid_oidc_settings", "redirect_url must be an absolute HTTPS URL without query, fragment, or userinfo")
-			return
+		// The redirect URI is optional: when it is blank the server derives it
+		// from the public URL or the incoming request. Only an explicit value
+		// is format-checked.
+		if current.RedirectURL != "" {
+			redirect, parseErr := url.Parse(current.RedirectURL)
+			if parseErr != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" {
+				writeError(w, 400, "invalid_oidc_settings", "redirect_url must be an absolute HTTPS URL without query, fragment, or userinfo")
+				return
+			}
 		}
 		ctx, cancel := contextWithTimeout(r, 10*time.Second)
 		_, discoveryErr := s.discoverOIDC(ctx, current.Issuer)

@@ -79,6 +79,11 @@ func (s *Server) loadNetworkSettings(ctx context.Context) (networkSettings, erro
 	}
 	s.networkMu.Unlock()
 
+	// Returning an error rather than dereferencing a nil pool keeps every
+	// caller on its documented failure path instead of panicking.
+	if s.store == nil || s.store.Pool == nil {
+		return networkSettings{}, errors.New("network settings store is unavailable")
+	}
 	var cfg networkSettings
 	err := s.store.Pool.QueryRow(ctx, `SELECT admin_ip_allowlist_enabled,admin_ip_allowlist,trusted_proxy_cidrs,updated_at
 		FROM network_settings WHERE id='default'`).
@@ -190,21 +195,49 @@ func (s *Server) withAdminNetwork(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// addrString renders an address for display, falling back to the raw peer
+// string so the screen never shows a blank or "invalid IP" where an operator
+// expects to read their own address.
+func addrString(address netip.Addr, raw string) string {
+	if address.IsValid() {
+		return address.String()
+	}
+	return strings.TrimSpace(raw)
+}
+
 func (s *Server) getNetworkSettings(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.loadNetworkSettings(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not load network settings")
 		return
 	}
+	peer := remoteIP(r)
+	forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	// A forwarded header from an unregistered peer is deliberately ignored for
+	// access control, but reporting it is what lets an administrator discover
+	// they are behind a proxy and which address to actually allow. Without
+	// this the screen shows only the proxy address and the allowlist cannot be
+	// configured correctly.
+	proxySuspected := forwarded != "" && !prefixesContain(cfg.proxyPrefixes, s.peerAddr(r))
 	writeJSON(w, http.StatusOK, map[string]any{
 		"adminIpAllowlistEnabled": cfg.AdminAllowlistEnabled,
 		"adminIpAllowlist":        strings.Join(cfg.AdminAllowlist, "\n"),
 		"trustedProxyCidrs":       strings.Join(cfg.TrustedProxies, "\n"),
-		// Shown in the UI so an administrator can add their own address
-		// without having to guess what the server sees.
-		"callerIp":  s.requestClientIP(r).String(),
-		"updatedAt": cfg.UpdatedAt,
+		// The address the allowlist is actually compared against.
+		"callerIp": addrString(clientIP(r, cfg.proxyPrefixes), peer),
+		// The direct TCP peer, which is the proxy when one is in front.
+		"peerIp": peer,
+		// Informational only, never used for a decision.
+		"forwardedFor":   forwarded,
+		"proxySuspected": proxySuspected,
+		"updatedAt":      cfg.UpdatedAt,
 	})
+}
+
+// peerAddr parses the direct TCP peer address.
+func (s *Server) peerAddr(r *http.Request) netip.Addr {
+	address, _ := netip.ParseAddr(remoteIP(r))
+	return address.Unmap()
 }
 
 type networkSettingsInput struct {

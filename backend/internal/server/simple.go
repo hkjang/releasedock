@@ -151,8 +151,13 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not load simple settings")
 		return
 	}
-	target, err := scanSimpleTarget(s.store.Pool.QueryRow(r.Context(),
-		`SELECT `+simpleTargetColumns+` FROM simple_targets WHERE id=$1 AND revoked_at IS NULL AND active`, targetID))
+	// The target may be omitted entirely. With a single active target there is
+	// nothing to choose, so a user can just drop files and deploy.
+	target, err := s.resolveSimpleTarget(r, targetID)
+	if errors.Is(err, errSimpleTargetAmbiguous) {
+		writeError(w, http.StatusBadRequest, "target_required", "배포 대상이 여러 개이므로 대상을 선택해야 합니다")
+		return
+	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "not_found", "배포 대상을 찾을 수 없습니다")
 		return
@@ -639,4 +644,31 @@ func (s *Server) streamSimpleRunLogs(w http.ResponseWriter, r *http.Request) {
 		case <-pollTicker.C:
 		}
 	}
+}
+
+// errSimpleTargetAmbiguous means the caller omitted the target while more than
+// one active target exists, so the server must not guess.
+var errSimpleTargetAmbiguous = errors.New("simple target is ambiguous")
+
+// resolveSimpleTarget loads the requested target, or the only active one when
+// the caller did not name it. This is what lets the deploy screen accept a
+// plain drag-and-drop with no selection step.
+func (s *Server) resolveSimpleTarget(r *http.Request, targetID string) (simpleTarget, error) {
+	if strings.TrimSpace(targetID) != "" {
+		return scanSimpleTarget(s.store.Pool.QueryRow(r.Context(),
+			`SELECT `+simpleTargetColumns+` FROM simple_targets WHERE id=$1 AND revoked_at IS NULL AND active`, targetID))
+	}
+	var count int
+	if err := s.store.Pool.QueryRow(r.Context(),
+		`SELECT count(*) FROM simple_targets WHERE revoked_at IS NULL AND active`).Scan(&count); err != nil {
+		return simpleTarget{}, err
+	}
+	switch {
+	case count == 0:
+		return simpleTarget{}, pgx.ErrNoRows
+	case count > 1:
+		return simpleTarget{}, errSimpleTargetAmbiguous
+	}
+	return scanSimpleTarget(s.store.Pool.QueryRow(r.Context(),
+		`SELECT `+simpleTargetColumns+` FROM simple_targets WHERE revoked_at IS NULL AND active LIMIT 1`))
 }

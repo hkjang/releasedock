@@ -476,10 +476,13 @@ export const api = {
   simpleRuns: (params: ListParams = {}, mine = false) =>
     request<PageResult<SimpleRun>>(`/simple/runs${toListQuery(params)}${mine ? (toListQuery(params) ? '&' : '?') + 'mine=true' : ''}`),
   simpleRun: (id: string) => request<SimpleRun>(`/simple/runs/${encodeURIComponent(id)}`),
+  // targetId may be empty: the server uses the only active target, which is
+  // what lets the deploy screen accept a bare drag-and-drop.
   startSimpleRun: (targetId: string, artifact: File) => {
     const form = new FormData();
     form.set('artifact', artifact);
-    return request<SimpleRun>(`/simple/targets/${encodeURIComponent(targetId)}/runs`, { method: 'POST', body: form });
+    const path = targetId ? `/simple/targets/${encodeURIComponent(targetId)}/runs` : '/simple/runs';
+    return request<SimpleRun>(path, { method: 'POST', body: form });
   },
   simpleRunLogStreamUrl: (id: string) => `${API_BASE}/simple/runs/${encodeURIComponent(id)}/logs/stream`,
 

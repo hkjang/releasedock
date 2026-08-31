@@ -46,7 +46,7 @@ const metadata: Record<SettingSection, { title: string; description: string; ico
 
 const initialValues: Record<SettingSection, SettingValue> = {
   general: { serviceName: 'ReleaseDock', artifactMaxSizeGb: 20, publicUrl: '', secureCookies: false, allowedOrigins: [] },
-  oidc: { enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: `${window.location.origin}/api/v1/auth/oidc/callback`, scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true },
+  oidc: { enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: '', scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true },
   ai: { enabled: false, baseUrl: '', apiKey: '', model: '', streamingDefault: true, maxTokens: 32768 },
   approval: { enabled: false, protectedEnvironments: '', allowSelfApproval: false, requireRejectComment: true },
   storage: { driver: 'local', localPath: '/var/lib/releasedock/artifacts' },
@@ -107,7 +107,24 @@ function OidcFields({ values, set, disabled }: FieldsProps) {
         <TextField label="Client ID" required={enabled} disabled={disabled || !enabled} value={String(values.clientId ?? '')} onChange={(e) => set('clientId', e.target.value)} fullWidth />
         <TextField label="Client Secret" type="password" required={enabled && !values.secretConfigured} disabled={disabled || !enabled} value={String(values.clientSecret ?? '')} onChange={(e) => set('clientSecret', e.target.value)} helperText={values.secretConfigured ? '저장된 Secret을 변경할 때만 입력하세요.' : '서버에서 암호화하여 저장합니다.'} fullWidth />
       </Stack>
-      <TextField label="Redirect URI" required={enabled} disabled={disabled || !enabled} value={String(values.redirectUrl ?? '')} onChange={(e) => set('redirectUrl', e.target.value)} fullWidth helperText="Keycloak Client의 Valid redirect URIs에 동일하게 등록하세요." />
+      <TextField
+        label="Redirect URI (선택)"
+        disabled={disabled || !enabled}
+        value={String(values.redirectUrl ?? '')}
+        onChange={(e) => set('redirectUrl', e.target.value)}
+        fullWidth
+        placeholder={String(values.effectiveRedirectUri ?? '')}
+        helperText="비워 두면 서버가 자동으로 결정합니다. 일반 설정의 공개 HTTPS URL이 있으면 그 값을, 없으면 접속에 사용된 주소를 사용합니다. 특정 값을 강제해야 할 때만 입력하십시오."
+      />
+      {Boolean(values.effectiveRedirectUri) && (
+        <TextField
+          label="Keycloak에 등록할 Redirect URI"
+          value={String(values.effectiveRedirectUri ?? '')}
+          fullWidth
+          slotProps={{ input: { readOnly: true } }}
+          helperText="위 설정을 비워 두어도 서버는 이 값을 사용합니다. Keycloak Client의 Valid redirect URIs에 이 값을 등록하십시오."
+        />
+      )}
       <Stack direction={{ xs: 'column', md: 'row' }} spacing={2}>
         <TextField label="Scopes" disabled={disabled || !enabled} value={String(values.scopes ?? '')} onChange={(e) => set('scopes', e.target.value)} fullWidth />
       </Stack>
@@ -255,8 +272,19 @@ function SimpleFields({ values, set, disabled }: FieldsProps) {
 function NetworkFields({ values, set, disabled }: FieldsProps) {
   const enabled = Boolean(values.adminIpAllowlistEnabled);
   const callerIp = String(values.callerIp ?? '');
+  const peerIp = String(values.peerIp ?? '');
+  const forwardedFor = String(values.forwardedFor ?? '');
+  const proxySuspected = Boolean(values.proxySuspected);
   const allowlist = String(values.adminIpAllowlist ?? '');
-  const alreadyListed = allowlist.split('\n').some((line) => line.trim() === callerIp);
+  const entries = allowlist.split('\n').map((line) => line.trim()).filter(Boolean);
+  const alreadyListed = entries.includes(callerIp);
+  const addToAllowlist = (value: string) =>
+    set('adminIpAllowlist', entries.includes(value) ? allowlist : [...entries, value].join('\n'));
+  const addTrustedProxy = (value: string) => {
+    const proxies = String(values.trustedProxyCidrs ?? '').split('\n').map((line) => line.trim()).filter(Boolean);
+    if (!proxies.includes(value)) set('trustedProxyCidrs', [...proxies, value].join('\n'));
+  };
+
   return (
     <Stack spacing={2.25}>
       <Alert severity={enabled ? 'warning' : 'info'}>
@@ -265,17 +293,39 @@ function NetworkFields({ values, set, disabled }: FieldsProps) {
           : '현재는 IP 제한이 없습니다. 활성화하면 아래 목록의 IP에서만 관리 기능을 사용할 수 있습니다.'}
       </Alert>
 
-      {Boolean(callerIp) && (
+      {/* Always rendered: an operator must be able to read the address the
+          server actually sees before turning the allowlist on. */}
+      <Alert
+        severity={callerIp && !alreadyListed && enabled ? 'warning' : 'success'}
+        action={!disabled && callerIp && !alreadyListed ? (
+          <Button size="small" onClick={() => addToAllowlist(callerIp)}>목록에 추가</Button>
+        ) : undefined}
+      >
+        <Stack spacing={0.25}>
+          <span>
+            현재 접속 IP: <strong>{callerIp || '확인할 수 없습니다'}</strong>
+            {alreadyListed && ' — 허용 목록에 포함되어 있습니다.'}
+            {!alreadyListed && callerIp && ' — 이 IP가 목록에 없으면 저장이 거부됩니다.'}
+          </span>
+          {Boolean(peerIp) && peerIp !== callerIp && (
+            <Typography variant="caption" color="text.secondary">
+              직접 접속 지점(프록시): {peerIp}
+            </Typography>
+          )}
+        </Stack>
+      </Alert>
+
+      {proxySuspected && (
         <Alert
-          severity={enabled && !alreadyListed ? 'warning' : 'success'}
-          action={!disabled && !alreadyListed ? (
-            <Button size="small" onClick={() => set('adminIpAllowlist', allowlist ? `${allowlist.replace(/\n+$/, '')}\n${callerIp}` : callerIp)}>
-              목록에 추가
-            </Button>
+          severity="warning"
+          action={!disabled && peerIp ? (
+            <Button size="small" onClick={() => addTrustedProxy(peerIp)}>프록시 신뢰 등록</Button>
           ) : undefined}
         >
-          현재 접속 IP: <strong>{callerIp}</strong>
-          {alreadyListed ? ' (허용 목록에 포함되어 있습니다)' : ' — 이 IP가 목록에 없으면 저장이 거부됩니다.'}
+          리버스 프록시 뒤에 있는 것으로 보입니다. 요청에 <code>X-Forwarded-For: {forwardedFor}</code>가 있지만
+          <strong> {peerIp}</strong>이(가) 신뢰 프록시로 등록되지 않아 무시하고 있습니다. 그래서 위의 현재 접속 IP가
+          실제 클라이언트가 아니라 프록시 주소로 표시됩니다. 프록시를 신뢰 목록에 등록하고 저장하면 실제 클라이언트 IP가
+          표시됩니다.
         </Alert>
       )}
 
@@ -289,6 +339,7 @@ function NetworkFields({ values, set, disabled }: FieldsProps) {
         multiline
         minRows={4}
         fullWidth
+        placeholder={callerIp}
         helperText="한 줄에 하나씩 입력합니다. 단일 주소(10.1.2.3)와 대역(192.168.10.0/24)을 모두 사용할 수 있습니다. 루프백(127.0.0.1, ::1)은 서버 콘솔 복구를 위해 항상 허용됩니다."
       />
 

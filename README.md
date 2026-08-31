@@ -59,13 +59,17 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 전체 릴리즈 오케스트레이션이 과한 현장을 위한 두 번째 진입점입니다. 사용자는 Keycloak SSO로 로그인하여 관리자가 등록한 대상을 고르고, `tar.gz`를 올리고, 실행 버튼을 누릅니다. 서버는 **파일을 지정 경로에 저장하고 지정된 명령 하나를 실행**할 뿐이며 이미지 로드·태그·Harbor push·승인·버전 비교는 하지 않습니다. 이미지 로드를 포함한 실제 절차는 관리자가 등록한 스크립트가 담당합니다.
 
-관리자는 **심플 모드 설정**에서 명령을 서비스별로 따로 둘지, 공통 명령 하나로 통일할지 선택합니다. 기본 화면 모드도 여기서 지정하며, 심플 모드에서는 배포·실행 기록만 메뉴에 노출됩니다.
+관리자는 **심플 모드 설정**에서 명령을 서비스별로 따로 둘지, 공통 명령 하나로 통일할지 선택합니다. 기본 화면 모드도 여기서 지정하며, 심플 모드에서는 배포·실행 기록만 메뉴에 노출됩니다. 활성 대상이 하나면 사용자는 대상을 고를 필요조차 없고, 여러 파일을 한 번에 끌어다 놓으면 순차적으로 처리됩니다.
 
 ```text
 업로드 → 지정 경로에 저장 → 지정된 명령 실행 → 로그 스트리밍
 ```
 
 심플 모드의 명령은 격리된 executor가 아니라 **API 서비스 계정이 직접 실행**합니다. 이는 전체 모드의 3-UID 격리를 사용하지 않는다는 뜻이므로, 등록 권한과 스크립트 신뢰 범위를 반드시 확인하십시오. 자세한 내용과 보안 트레이드오프는 [심플 모드 가이드](docs/simple-mode.md)에 있습니다.
+
+## Keycloak SSO
+
+연동에 필요한 값은 **Issuer, Client ID, Client Secret** 세 가지입니다. Redirect URI는 입력하지 않아도 되며, 서버가 공개 HTTPS URL 또는 접속에 사용된 주소에서 파생하여 로그인 state에 고정한 뒤 토큰 교환에서 그대로 재사용합니다. Keycloak에 등록할 값은 관리 화면에 그대로 표시됩니다.
 
 ## 관리자 접근 IP 제한
 
@@ -77,7 +81,7 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 ```bash
 make package
-# release/releasedock-v0.3.0.tar.gz
+# release/releasedock-v0.3.1.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.
@@ -90,7 +94,7 @@ make package
 - 암호화 secret store와 개인 API key 해시 저장/회전
 - 역할별로 변경 가능한 RBAC permission과 개인 API key별 축소 scope
 - 운영 배포 동시 실행 lock, 단계별 append-only 로그와 감사 이력
-- OIDC issuer/JWKS 검증, state/nonce/PKCE
+- OIDC issuer/JWKS 검증, state/nonce/PKCE, 로그인 state에 고정한 redirect URI 재사용
 - 관리 API 출발지 IP 허용 목록과 신뢰 프록시 기반 X-Forwarded-For 해석
 - 심플 모드는 셸 없는 인자 실행·환경변수 allowlist·프로세스 그룹 정리를 적용하지만, 별도 executor UID 격리 밖에서 실행됩니다
 - MCP Origin 검증, 인증 및 권한 검사

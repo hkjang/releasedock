@@ -7,14 +7,17 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  IconButton,
+  LinearProgress,
   MenuItem,
   Stack,
   TextField,
   Typography,
 } from '@mui/material';
 import CloudUploadRoundedIcon from '@mui/icons-material/CloudUploadRounded';
+import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
-import { api, ApiError, type SimpleRun, type SimpleTarget } from '../../api/client';
+import { api, ApiError, type SimpleTarget } from '../../api/client';
 import { PageHeader } from '../../components/PageHeader';
 import { formatBytes } from '../../utils/format';
 
@@ -24,29 +27,59 @@ interface LogLine {
   message: string;
 }
 
+type ItemStatus = 'QUEUED' | 'UPLOADING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'SKIPPED';
+
+interface QueueItem {
+  key: string;
+  file: File;
+  status: ItemStatus;
+  runId?: string;
+  error?: string;
+  exitCode?: number | null;
+}
+
 const TERMINAL = ['SUCCESS', 'FAILED', 'TIMEOUT'];
 
 function statusColor(status: string): 'default' | 'info' | 'success' | 'error' | 'warning' {
   if (status === 'SUCCESS') return 'success';
   if (status === 'FAILED') return 'error';
   if (status === 'TIMEOUT') return 'warning';
-  if (status === 'RUNNING') return 'info';
+  if (status === 'RUNNING' || status === 'UPLOADING') return 'info';
   return 'default';
 }
+
+function statusLabel(status: ItemStatus): string {
+  switch (status) {
+    case 'QUEUED': return '대기';
+    case 'UPLOADING': return '업로드 중';
+    case 'RUNNING': return '실행 중';
+    case 'SUCCESS': return '성공';
+    case 'FAILED': return '실패';
+    case 'TIMEOUT': return '시간 초과';
+    case 'SKIPPED': return '건너뜀';
+  }
+}
+
+function acceptableName(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.endsWith('.tar') || lower.endsWith('.tar.gz');
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function SimpleDeployPage() {
   const [targets, setTargets] = useState<SimpleTarget[]>([]);
   const [targetId, setTargetId] = useState('');
-  const [file, setFile] = useState<File>();
+  const [queue, setQueue] = useState<QueueItem[]>([]);
   const [dragging, setDragging] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [starting, setStarting] = useState(false);
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
-  const [run, setRun] = useState<SimpleRun>();
-  const [status, setStatus] = useState('');
+  const [activeRunId, setActiveRunId] = useState('');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cancelledRef = useRef(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -55,7 +88,8 @@ export function SimpleDeployPage() {
       .then((response) => {
         if (cancelled) return;
         setTargets(response.items);
-        // With a single target there is nothing to choose, so preselect it.
+        // A single target needs no choice at all, and the server resolves it
+        // on its own, so the selector stays hidden.
         if (response.items.length === 1) setTargetId(response.items[0].id);
       })
       .catch((cause: unknown) => {
@@ -69,73 +103,121 @@ export function SimpleDeployPage() {
     };
   }, []);
 
+  // With more than one target the server cannot guess, so a choice is required.
+  const mustChooseTarget = targets.length > 1;
   const selected = useMemo(() => targets.find((target) => target.id === targetId), [targets, targetId]);
+  const effectiveTarget = mustChooseTarget ? selected : targets[0];
 
-  // Stream the live command output for the run just started.
   useEffect(() => {
-    if (!run) return;
+    if (!activeRunId) return;
     let sequence = 0;
-    const source = new EventSource(api.simpleRunLogStreamUrl(run.id), { withCredentials: true });
+    const source = new EventSource(api.simpleRunLogStreamUrl(activeRunId), { withCredentials: true });
     const receive = (rawEvent: Event) => {
       const event = rawEvent as MessageEvent<string>;
       sequence += 1;
       try {
         const parsed = JSON.parse(event.data) as { stream?: string; message?: string };
-        setLogs((current) => [...current.slice(-4998), { id: sequence, stream: parsed.stream ?? 'stdout', message: parsed.message ?? '' }]);
+        setLogs((current) => [...current.slice(-4998), { id: Date.now() + sequence, stream: parsed.stream ?? 'stdout', message: parsed.message ?? '' }]);
       } catch {
-        setLogs((current) => [...current.slice(-4998), { id: sequence, stream: 'stdout', message: event.data }]);
+        setLogs((current) => [...current.slice(-4998), { id: Date.now() + sequence, stream: 'stdout', message: event.data }]);
       }
     };
     source.addEventListener('log', receive);
-    source.addEventListener('end', (rawEvent: Event) => {
-      const event = rawEvent as MessageEvent<string>;
-      try {
-        const parsed = JSON.parse(event.data) as { status?: string };
-        if (parsed.status) setStatus(parsed.status);
-      } catch {
-        /* the poll below still settles the final status */
-      }
-      source.close();
-      void api.simpleRun(run.id).then((latest) => setStatus(latest.status)).catch(() => undefined);
-    });
+    source.addEventListener('end', () => source.close());
     return () => source.close();
-  }, [run]);
+  }, [activeRunId]);
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ block: 'end' });
   }, [logs]);
 
-  const pickFile = useCallback((candidate?: File) => {
-    if (!candidate) return;
-    const name = candidate.name.toLowerCase();
-    if (!name.endsWith('.tar') && !name.endsWith('.tar.gz')) {
-      setError('.tar 또는 .tar.gz 파일만 올릴 수 있습니다.');
-      return;
+  const addFiles = useCallback((files: FileList | File[] | null) => {
+    if (!files) return;
+    const list = Array.from(files);
+    const rejected = list.filter((file) => !acceptableName(file.name));
+    const accepted = list.filter((file) => acceptableName(file.name));
+    if (rejected.length) {
+      setError(`.tar 또는 .tar.gz 파일만 올릴 수 있습니다: ${rejected.map((file) => file.name).join(', ')}`);
+    } else {
+      setError('');
     }
-    setError('');
-    setFile(candidate);
+    if (!accepted.length) return;
+    setQueue((current) => {
+      const existing = new Set(current.map((item) => `${item.file.name}:${item.file.size}`));
+      const additions = accepted
+        .filter((file) => !existing.has(`${file.name}:${file.size}`))
+        .map((file, index) => ({
+          key: `${file.name}:${file.size}:${Date.now()}:${index}`,
+          file,
+          status: 'QUEUED' as ItemStatus,
+        }));
+      return [...current, ...additions];
+    });
   }, []);
 
-  const start = async () => {
-    if (!selected || !file) return;
-    setStarting(true);
-    setError('');
-    setLogs([]);
-    setStatus('PENDING');
-    try {
-      const created = await api.startSimpleRun(selected.id, file);
-      setRun(created);
-      setStatus(created.status);
-    } catch (cause) {
-      setStatus('');
-      setError(cause instanceof ApiError ? cause.message : '배포를 시작하지 못했습니다.');
-    } finally {
-      setStarting(false);
+  const removeItem = (key: string) => setQueue((current) => current.filter((item) => item.key !== key));
+
+  const patchItem = (key: string, patch: Partial<QueueItem>) =>
+    setQueue((current) => current.map((item) => (item.key === key ? { ...item, ...patch } : item)));
+
+  // Runs are strictly sequential: the database permits only one in-flight run
+  // per target, so a parallel upload of several files would be rejected.
+  const waitForTerminal = async (runId: string): Promise<{ status: string; exitCode: number | null; error?: string }> => {
+    for (;;) {
+      await sleep(1500);
+      try {
+        const run = await api.simpleRun(runId);
+        if (TERMINAL.includes(run.status)) return { status: run.status, exitCode: run.exitCode, error: run.error };
+      } catch {
+        // A transient read failure should not abandon a run that is still going.
+      }
     }
   };
 
-  const busy = starting || (Boolean(status) && !TERMINAL.includes(status));
-  const canStart = Boolean(selected?.ready && file) && !busy;
+  const start = async () => {
+    const pending = queue.filter((item) => item.status === 'QUEUED');
+    if (!pending.length) return;
+    if (mustChooseTarget && !targetId) {
+      setError('배포 대상을 선택하십시오.');
+      return;
+    }
+    cancelledRef.current = false;
+    setRunning(true);
+    setError('');
+    setLogs([]);
+
+    for (const item of pending) {
+      if (cancelledRef.current) {
+        patchItem(item.key, { status: 'SKIPPED' });
+        continue;
+      }
+      patchItem(item.key, { status: 'UPLOADING' });
+      setLogs((current) => [...current, { id: Date.now(), stream: 'system', message: `── ${item.file.name} ──` }]);
+      let runId = '';
+      try {
+        const created = await api.startSimpleRun(targetId, item.file);
+        runId = created.id;
+        patchItem(item.key, { status: 'RUNNING', runId });
+        setActiveRunId(runId);
+      } catch (cause) {
+        const message = cause instanceof ApiError ? cause.message : '배포를 시작하지 못했습니다.';
+        patchItem(item.key, { status: 'FAILED', error: message });
+        setLogs((current) => [...current, { id: Date.now(), stream: 'stderr', message }]);
+        continue;
+      }
+      const outcome = await waitForTerminal(runId);
+      patchItem(item.key, {
+        status: outcome.status as ItemStatus,
+        exitCode: outcome.exitCode,
+        error: outcome.error,
+      });
+    }
+    setActiveRunId('');
+    setRunning(false);
+  };
+
+  const queuedCount = queue.filter((item) => item.status === 'QUEUED').length;
+  const canStart = queuedCount > 0 && !running && Boolean(effectiveTarget?.ready ?? true) && (!mustChooseTarget || Boolean(targetId));
 
   if (loading) {
     return (
@@ -147,12 +229,10 @@ export function SimpleDeployPage() {
 
   return (
     <Stack spacing={3}>
-      <PageHeader title="배포" description="패키지를 올리고 배포를 실행합니다." />
+      <PageHeader title="배포" description="패키지를 끌어다 놓고 배포를 실행합니다. 여러 개를 한 번에 올릴 수 있습니다." />
 
       {!targets.length && (
-        <Alert severity="info">
-          아직 배포 대상이 없습니다. 관리자에게 심플 대상 등록을 요청하십시오.
-        </Alert>
+        <Alert severity="info">아직 배포 대상이 없습니다. 관리자에게 심플 대상 등록을 요청하십시오.</Alert>
       )}
 
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
@@ -161,25 +241,31 @@ export function SimpleDeployPage() {
         <Card>
           <CardContent>
             <Stack spacing={3}>
-              <TextField
-                select
-                label="배포 대상"
-                value={targetId}
-                onChange={(event) => setTargetId(event.target.value)}
-                disabled={busy}
-                helperText={selected ? selected.description || selected.uploadDir : '배포할 서비스를 선택하십시오.'}
-                fullWidth
-              >
-                {targets.map((target) => (
-                  <MenuItem key={target.id} value={target.id} disabled={!target.ready}>
-                    {target.name}
-                    {!target.ready && ' (실행 명령 미설정)'}
-                  </MenuItem>
-                ))}
-              </TextField>
+              {mustChooseTarget ? (
+                <TextField
+                  select
+                  label="배포 대상"
+                  value={targetId}
+                  onChange={(event) => setTargetId(event.target.value)}
+                  disabled={running}
+                  helperText={selected ? selected.description || selected.uploadDir : '배포 대상이 여러 개이므로 하나를 선택하십시오.'}
+                  fullWidth
+                >
+                  {targets.map((target) => (
+                    <MenuItem key={target.id} value={target.id} disabled={!target.ready}>
+                      {target.name}
+                      {!target.ready && ' (실행 명령 미설정)'}
+                    </MenuItem>
+                  ))}
+                </TextField>
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  배포 대상: <strong>{targets[0].name}</strong> · {targets[0].uploadDir}
+                </Typography>
+              )}
 
-              {selected && !selected.ready && (
-                <Alert severity="warning">{selected.notReadyReason || '이 대상은 아직 실행할 수 없습니다.'}</Alert>
+              {effectiveTarget && !effectiveTarget.ready && (
+                <Alert severity="warning">{effectiveTarget.notReadyReason || '이 대상은 아직 실행할 수 없습니다.'}</Alert>
               )}
 
               <Box
@@ -191,16 +277,16 @@ export function SimpleDeployPage() {
                 onDrop={(event) => {
                   event.preventDefault();
                   setDragging(false);
-                  if (!busy) pickFile(event.dataTransfer.files?.[0]);
+                  if (!running) addFiles(event.dataTransfer.files);
                 }}
-                onClick={() => !busy && inputRef.current?.click()}
+                onClick={() => !running && inputRef.current?.click()}
                 sx={{
                   border: '2px dashed',
                   borderColor: dragging ? 'primary.main' : 'divider',
                   borderRadius: 2,
                   p: 5,
                   textAlign: 'center',
-                  cursor: busy ? 'default' : 'pointer',
+                  cursor: running ? 'default' : 'pointer',
                   bgcolor: dragging ? 'action.hover' : 'transparent',
                 }}
               >
@@ -208,18 +294,50 @@ export function SimpleDeployPage() {
                   ref={inputRef}
                   type="file"
                   accept=".tar,.tar.gz,.gz"
+                  multiple
                   hidden
-                  onChange={(event) => pickFile(event.target.files?.[0])}
+                  onChange={(event) => {
+                    addFiles(event.target.files);
+                    event.target.value = '';
+                  }}
                 />
                 <CloudUploadRoundedIcon sx={{ fontSize: 44, color: 'text.secondary' }} />
-                <Typography sx={{ mt: 1 }}>
-                  {file ? `${file.name} (${formatBytes(file.size)})` : '패키지 파일을 끌어 놓거나 눌러서 선택합니다.'}
-                </Typography>
+                <Typography sx={{ mt: 1 }}>패키지 파일을 끌어 놓거나 눌러서 선택합니다. 여러 개를 함께 놓아도 됩니다.</Typography>
                 <Typography variant="body2" color="text.secondary">
                   .tar.gz 도커 이미지 압축 파일
-                  {selected ? ` · 최대 ${formatBytes(selected.maxUploadBytes)}` : ''}
+                  {effectiveTarget ? ` · 파일당 최대 ${formatBytes(effectiveTarget.maxUploadBytes)}` : ''}
                 </Typography>
               </Box>
+
+              {Boolean(queue.length) && (
+                <Stack spacing={1}>
+                  {queue.map((item) => (
+                    <Stack
+                      key={item.key}
+                      direction="row"
+                      alignItems="center"
+                      spacing={1.5}
+                      sx={{ px: 1.5, py: 1, borderRadius: 1, bgcolor: 'background.default' }}
+                    >
+                      <Chip size="small" label={statusLabel(item.status)} color={statusColor(item.status)} sx={{ minWidth: 84 }} />
+                      <Box sx={{ flex: 1, minWidth: 0 }}>
+                        <Typography noWrap>{item.file.name}</Typography>
+                        <Typography variant="caption" color={item.error ? 'error.light' : 'text.secondary'}>
+                          {item.error ? item.error : formatBytes(item.file.size)}
+                          {item.exitCode !== undefined && item.exitCode !== null && ` · exit ${item.exitCode}`}
+                        </Typography>
+                      </Box>
+                      {item.status === 'QUEUED' && !running && (
+                        <IconButton size="small" aria-label={`${item.file.name} 제거`} onClick={() => removeItem(item.key)}>
+                          <DeleteOutlineRoundedIcon fontSize="small" />
+                        </IconButton>
+                      )}
+                    </Stack>
+                  ))}
+                </Stack>
+              )}
+
+              {running && <LinearProgress />}
 
               <Stack direction="row" spacing={2} alignItems="center">
                 <Button
@@ -229,23 +347,26 @@ export function SimpleDeployPage() {
                   disabled={!canStart}
                   onClick={() => void start()}
                 >
-                  배포 실행
+                  {queuedCount > 1 ? `${queuedCount}개 배포 실행` : '배포 실행'}
                 </Button>
-                {Boolean(status) && <Chip label={status} color={statusColor(status)} />}
-                {busy && <CircularProgress size={20} />}
+                {running && (
+                  <Button color="inherit" onClick={() => { cancelledRef.current = true; }}>
+                    남은 파일 중단
+                  </Button>
+                )}
+                {!running && Boolean(queue.length) && (
+                  <Button color="inherit" onClick={() => setQueue([])}>목록 비우기</Button>
+                )}
               </Stack>
             </Stack>
           </CardContent>
         </Card>
       )}
 
-      {Boolean(run) && (
+      {Boolean(logs.length) && (
         <Card>
           <CardContent>
-            <Typography variant="subtitle1" sx={{ mb: 1 }}>실행 로그</Typography>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
-              {run?.filename} · {run?.storedPath}
-            </Typography>
+            <Typography variant="subtitle1" sx={{ mb: 1.5 }}>실행 로그</Typography>
             <Box
               component="pre"
               sx={{
@@ -261,17 +382,15 @@ export function SimpleDeployPage() {
                 wordBreak: 'break-all',
               }}
             >
-              {logs.length
-                ? logs.map((line) => (
-                    <Box
-                      key={line.id}
-                      component="span"
-                      sx={{ display: 'block', color: line.stream === 'stderr' ? 'error.light' : line.stream === 'system' ? 'text.secondary' : 'inherit' }}
-                    >
-                      {line.message}
-                    </Box>
-                  ))
-                : '출력을 기다리는 중입니다...'}
+              {logs.map((line) => (
+                <Box
+                  key={line.id}
+                  component="span"
+                  sx={{ display: 'block', color: line.stream === 'stderr' ? 'error.light' : line.stream === 'system' ? 'text.secondary' : 'inherit' }}
+                >
+                  {line.message}
+                </Box>
+              ))}
               <div ref={logEndRef} />
             </Box>
           </CardContent>

@@ -222,6 +222,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/simple/targets", s.withPermission("simple.deploy", s.listUserSimpleTargets))
 	// Starting a run is ordinary user work, so a scoped API key may do it.
 	mux.HandleFunc("POST /api/v1/simple/targets/{id}/runs", s.withPermission("simple.deploy", s.createSimpleRun))
+	// Target-less form: valid when exactly one active target exists, so the
+	// deploy screen can accept a bare drag-and-drop.
+	mux.HandleFunc("POST /api/v1/simple/runs", s.withPermission("simple.deploy", s.createSimpleRun))
 	mux.HandleFunc("GET /api/v1/simple/runs", s.withPermission("simple.read", s.listSimpleRuns))
 	mux.HandleFunc("GET /api/v1/simple/runs/{id}", s.withPermission("simple.read", s.getSimpleRun))
 	mux.HandleFunc("GET /api/v1/simple/runs/{id}/logs/stream", s.withPermission("simple.read", s.streamSimpleRunLogs))

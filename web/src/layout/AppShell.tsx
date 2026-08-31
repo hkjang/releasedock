@@ -45,7 +45,7 @@ import {
   useMediaQuery,
 } from '@mui/material';
 import { alpha, useTheme } from '@mui/material/styles';
-import { useEffect, useMemo, useState, type ElementType, type MouseEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type ElementType, type MouseEvent } from 'react';
 import { Link as RouterLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useUiMode } from '../app/UiModeContext';
 import { useVersion } from '../app/VersionContext';
@@ -194,6 +194,15 @@ function Navigation({ onNavigate }: { onNavigate: () => void }) {
   const [expanded, setExpanded] = useState(initialExpanded);
   const activeSections = mode === 'simple' ? simpleSections : sections;
 
+  // With a long list the active entry can sit outside the visible area on
+  // load or after a mode switch, so it is brought into view.
+  const selectedRef = useRef<HTMLAnchorElement | null>(null);
+  useEffect(() => {
+    // Guarded because scrollIntoView is absent in jsdom, where the nav is
+    // rendered by the route tests.
+    const element = selectedRef.current;
+    if (typeof element?.scrollIntoView === 'function') element.scrollIntoView({ block: 'nearest' });
+  }, [pathname, activeSections]);
   useEffect(() => {
     window.localStorage.setItem(EXPANDED_KEY, JSON.stringify(expanded));
   }, [expanded]);
@@ -204,14 +213,39 @@ function Navigation({ onNavigate }: { onNavigate: () => void }) {
   }, [pathname, activeSections]);
 
   return (
-    <Box component="nav" aria-label="주 메뉴" sx={{ flex: 1, minHeight: 0, overflowY: 'auto', px: 1.25, py: 1.5 }}>
+    <Box
+      component="nav"
+      aria-label="주 메뉴"
+      sx={{
+        flex: '1 1 auto',
+        // minHeight:0 is what lets a flex child actually shrink below its
+        // content height; without it the list grows and never scrolls.
+        minHeight: 0,
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        overscrollBehavior: 'contain',
+        WebkitOverflowScrolling: 'touch',
+        px: 1.25,
+        py: 1.5,
+      }}
+    >
       {activeSections.map((section) => ({ ...section, items: section.items.filter((item) => !item.permission || hasPermission(item.permission)) })).filter((section) => section.items.length > 0).map((section) => (
         <Box key={section.id} sx={{ mb: 1 }}>
           <ListItemButton
             onClick={() => setExpanded((current) => ({ ...current, [section.id]: !current[section.id] }))}
             aria-expanded={expanded[section.id]}
             aria-controls={`nav-${section.id}`}
-            sx={{ borderRadius: 2, minHeight: 42, color: 'text.secondary' }}
+            sx={{
+              borderRadius: 2,
+              minHeight: 42,
+              color: 'text.secondary',
+              // Sticky so the section a long list belongs to stays identifiable
+              // while scrolling through it.
+              position: 'sticky',
+              top: 0,
+              zIndex: 1,
+              bgcolor: '#0b1220',
+            }}
           >
             <ListItemText primary={section.label} primaryTypographyProps={{ variant: 'caption', fontWeight: 800, letterSpacing: '.07em' }} />
             {expanded[section.id] ? <ExpandLessRoundedIcon fontSize="small" /> : <ExpandMoreRoundedIcon fontSize="small" />}
@@ -227,6 +261,7 @@ function Navigation({ onNavigate }: { onNavigate: () => void }) {
                     to={item.path}
                     key={item.path}
                     selected={selected}
+                    ref={selected ? selectedRef : undefined}
                     onClick={onNavigate}
                     aria-current={selected ? 'page' : undefined}
                     sx={{
@@ -291,8 +326,8 @@ export function AppShell() {
   };
 
   const drawer = (
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', bgcolor: '#0b1220' }}>
-      <Toolbar sx={{ px: 2.25, minHeight: '72px !important' }}>
+    <Box sx={{ height: '100%', minHeight: 0, display: 'flex', flexDirection: 'column', bgcolor: '#0b1220' }}>
+      <Toolbar sx={{ px: 2.25, minHeight: '72px !important', flexShrink: 0 }}>
         <Logo />
         {!desktop && (
           <IconButton aria-label="메뉴 닫기" onClick={() => setMobileOpen(false)} sx={{ ml: 'auto' }}>
@@ -303,7 +338,7 @@ export function AppShell() {
       <Divider />
       <Navigation onNavigate={() => setMobileOpen(false)} />
       <Divider />
-      <Box sx={{ p: 1.5 }}>
+      <Box sx={{ p: 1.5, flexShrink: 0 }}>
         <Typography variant="caption" color="text.secondary" sx={{ px: 1 }}>
           안전한 릴리즈 오케스트레이션
         </Typography>
@@ -404,7 +439,18 @@ export function AppShell() {
           open={desktop || mobileOpen}
           onClose={() => setMobileOpen(false)}
           ModalProps={{ keepMounted: true }}
-          sx={{ '& .MuiDrawer-paper': { width: drawerWidth, borderRightColor: 'divider' } }}
+          sx={{
+            // The paper must not scroll itself: it is a fixed-height flex column
+            // so the nav list below is the single bounded scroll container.
+            '& .MuiDrawer-paper': {
+              width: drawerWidth,
+              borderRightColor: 'divider',
+              height: '100%',
+              overflow: 'hidden',
+              display: 'flex',
+              flexDirection: 'column',
+            },
+          }}
         >
           {drawer}
         </Drawer>

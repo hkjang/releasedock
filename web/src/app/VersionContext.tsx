@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { api } from '../api/client';
 import type { VersionInfo } from '../types/domain';
 
-const fallbackVersion = import.meta.env.VITE_RELEASEDOCK_VERSION || '0.3.0';
+const fallbackVersion = import.meta.env.VITE_RELEASEDOCK_VERSION || '0.3.1';
 const VersionContext = createContext<VersionInfo>({ version: fallbackVersion });
 
 export function VersionProvider({ children }: { children: ReactNode }) {

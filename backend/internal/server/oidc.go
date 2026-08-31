@@ -14,6 +14,7 @@ import (
 	"io"
 	"math/big"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -55,6 +56,85 @@ func loadOIDCWithQueryer(ctx context.Context, queryer dependencyQueryer, forUpda
 	err := queryer.QueryRow(ctx, query).
 		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.DefaultRoleID)
 	return cfg, err
+}
+
+
+// oidcCallbackPath is fixed by the route table, so the redirect URI only ever
+// varies by origin.
+const oidcCallbackPath = "/api/v1/auth/oidc/callback"
+
+// requestOrigin reconstructs the origin the browser actually used. Forwarded
+// headers are honoured only when the immediate peer is a configured trusted
+// proxy; otherwise a client could choose its own redirect URI.
+func (s *Server) requestOrigin(ctx context.Context, r *http.Request) string {
+	host := r.Host
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if cfg, err := s.loadNetworkSettings(ctx); err == nil && len(cfg.proxyPrefixes) > 0 {
+		if peer, parseErr := netip.ParseAddr(remoteIP(r)); parseErr == nil && prefixesContain(cfg.proxyPrefixes, peer.Unmap()) {
+			if forwarded := forwardedFirst(r.Header.Get("X-Forwarded-Proto")); forwarded == "http" || forwarded == "https" {
+				scheme = forwarded
+			}
+			if forwarded := forwardedFirst(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
+				host = forwarded
+			}
+		}
+	}
+	// A TLS-terminating proxy that forwards neither X-Forwarded-Proto nor a
+	// trusted-proxy entry would otherwise yield http, which every identity
+	// provider rejects for a non-loopback redirect URI.
+	if scheme == "http" && !loopbackHost(host) {
+		scheme = "https"
+	}
+	if !validOriginHost(host) {
+		return ""
+	}
+	return scheme + "://" + host
+}
+
+// forwardedFirst returns the left-most entry of a comma-separated forwarded
+// header, which is the value describing the original client request.
+func forwardedFirst(value string) string {
+	if value == "" {
+		return ""
+	}
+	first := value
+	if index := strings.IndexByte(value, ','); index >= 0 {
+		first = value[:index]
+	}
+	return strings.ToLower(strings.TrimSpace(first))
+}
+
+// validOriginHost rejects anything that is not a bare host[:port], so a header
+// cannot smuggle a path, credentials, or a second URL into the redirect URI.
+func validOriginHost(host string) bool {
+	if host == "" || len(host) > 255 {
+		return false
+	}
+	if strings.ContainsAny(host, "/\\?#@ \t\r\n") {
+		return false
+	}
+	parsed, err := url.Parse("https://" + host)
+	return err == nil && parsed.Host == host && parsed.Path == ""
+}
+
+// resolveOIDCRedirectURI decides which redirect URI to present to the identity
+// provider. An explicitly configured value always wins; otherwise the public
+// URL is used, and failing that the value is derived from the request. This is
+// why the setting can be left blank entirely.
+func (s *Server) resolveOIDCRedirectURI(ctx context.Context, r *http.Request, cfg oidcSettings) string {
+	if configured := strings.TrimSpace(cfg.RedirectURL); configured != "" {
+		return configured
+	}
+	if origin, err := s.configuredPublicOrigin(ctx); err == nil && origin != "" {
+		return origin + oidcCallbackPath
+	}
+	if origin := s.requestOrigin(ctx, r); origin != "" {
+		return origin + oidcCallbackPath
+	}
+	return ""
 }
 
 func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +195,11 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "oidc_discovery_failed", "identity provider discovery failed")
 		return
 	}
+	redirectURI := s.resolveOIDCRedirectURI(r.Context(), r, cfg)
+	if redirectURI == "" {
+		writeError(w, http.StatusInternalServerError, "oidc_redirect_unresolved", "could not determine the OIDC redirect URI for this request")
+		return
+	}
 	state, _ := secure.RandomToken(32)
 	nonce, _ := secure.RandomToken(24)
 	codeVerifier, _ := secure.RandomToken(32)
@@ -124,14 +209,14 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 	if !safeReturnTo(returnTo) {
 		returnTo = "/"
 	}
-	_, err = s.store.Pool.Exec(r.Context(), `WITH expired AS (DELETE FROM oidc_states WHERE expires_at<now()) INSERT INTO oidc_states(state_hash,nonce,code_verifier,return_to,expires_at) VALUES($1,$2,$3,$4,now()+interval '10 minutes')`, secure.TokenHash(state), nonce, codeVerifier, returnTo)
+	_, err = s.store.Pool.Exec(r.Context(), `WITH expired AS (DELETE FROM oidc_states WHERE expires_at<now()) INSERT INTO oidc_states(state_hash,nonce,code_verifier,return_to,redirect_uri,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '10 minutes')`, secure.TokenHash(state), nonce, codeVerifier, returnTo, redirectURI)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not initiate OIDC login")
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "releasedock_oidc_state", Value: state, Path: "/api/v1/auth/oidc/callback", HttpOnly: true, Secure: s.useSecureCookies(r.Context(), r), SameSite: http.SameSiteLaxMode, MaxAge: 600})
 	params := url.Values{
-		"response_type": {"code"}, "client_id": {cfg.ClientID}, "redirect_uri": {cfg.RedirectURL},
+		"response_type": {"code"}, "client_id": {cfg.ClientID}, "redirect_uri": {redirectURI},
 		"scope": {strings.Join(cfg.Scopes, " ")}, "state": {state}, "nonce": {nonce},
 		"code_challenge": {codeChallenge}, "code_challenge_method": {"S256"},
 	}
@@ -155,8 +240,8 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: "releasedock_oidc_state", Value: "", Path: "/api/v1/auth/oidc/callback", HttpOnly: true, Secure: s.useSecureCookies(r.Context(), r), SameSite: http.SameSiteLaxMode, MaxAge: -1})
-	var nonce, codeVerifier, returnTo string
-	err := s.store.Pool.QueryRow(r.Context(), `DELETE FROM oidc_states WHERE state_hash=$1 AND expires_at>now() RETURNING nonce,code_verifier,return_to`, secure.TokenHash(state)).Scan(&nonce, &codeVerifier, &returnTo)
+	var nonce, codeVerifier, returnTo, redirectURI string
+	err := s.store.Pool.QueryRow(r.Context(), `DELETE FROM oidc_states WHERE state_hash=$1 AND expires_at>now() RETURNING nonce,code_verifier,return_to,redirect_uri`, secure.TokenHash(state)).Scan(&nonce, &codeVerifier, &returnTo, &redirectURI)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_oidc_state", "OIDC state expired or was already used")
 		return
@@ -165,6 +250,11 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	if err != nil || !cfg.Enabled {
 		writeError(w, http.StatusBadRequest, "oidc_disabled", "OIDC login is not enabled")
 		return
+	}
+	// A state row created before the redirect URI was pinned carries an empty
+	// value; resolve it exactly as the login leg would have.
+	if redirectURI == "" {
+		redirectURI = s.resolveOIDCRedirectURI(r.Context(), r, cfg)
 	}
 	discovery, err := s.discoverOIDC(r.Context(), cfg.Issuer)
 	if err != nil {
@@ -177,7 +267,7 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "secret_error", "OIDC secret could not be decrypted")
 		return
 	}
-	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {cfg.RedirectURL}, "code_verifier": {codeVerifier}}
+	form := url.Values{"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirectURI}, "code_verifier": {codeVerifier}}
 	req, _ := http.NewRequestWithContext(r.Context(), http.MethodPost, discovery.TokenEndpoint, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
