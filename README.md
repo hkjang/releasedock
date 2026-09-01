@@ -64,6 +64,8 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 관리자는 **심플 모드 설정**에서 명령을 서비스별로 따로 둘지, 공통 명령 하나로 통일할지 선택합니다. 기본 화면 모드도 여기서 지정하며, 심플 모드에서는 배포·실행 기록만 메뉴에 노출됩니다. 활성 대상이 하나면 사용자는 대상을 고를 필요조차 없고, 여러 파일을 한 번에 끌어다 놓으면 순차적으로 처리됩니다.
 
+실행 기록에서는 각 실행의 전체 로그와 실제로 사용된 명령 스냅샷을 확인하고 평문으로 내려받을 수 있습니다. 일반 사용자는 자신의 실행만, `admin.simple.read` 권한을 가진 관리자는 모든 사용자의 실행을 봅니다.
+
 ```text
 업로드 → 지정 경로에 저장 → 지정된 명령 실행 → 로그 스트리밍
 ```
@@ -73,6 +75,8 @@ ai-portal-v2.4.2-rc1.tar.gz
 ## Keycloak SSO
 
 연동에 필요한 값은 **Issuer, Client ID, Client Secret** 세 가지입니다. Redirect URI는 입력하지 않아도 되며, 서버가 일반 설정의 **사이트 공개 주소** 또는 접속에 사용된 주소에서 파생하여 로그인 state에 고정한 뒤 토큰 교환에서 그대로 재사용합니다. Keycloak에 등록할 값은 관리 화면에 그대로 표시됩니다.
+
+`Keycloak 세션이 있으면 자동 로그인` 을 켜면 세션이 살아 있는 사용자는 로그인 화면 없이 바로 들어갑니다. `prompt=none` 을 사용하므로 세션이 없으면 화면 없이 조용히 실패해 평소의 로그인 화면이 표시되고, 브라우저 세션당 한 번만 시도하며 사용자가 직접 로그아웃한 뒤에는 다시 시도하지 않습니다.
 
 폐쇄망 Keycloak이 TLS 없이 운영되거나 backchannel(`token_endpoint`, `jwks_uri`)을 평문 HTTP로 내려주는 경우 `내부 평문 HTTP endpoint 허용`을 켜면 연동됩니다. 이 옵션을 켜도 공개 라우팅 가능한 호스트에는 평문을 허용하지 않습니다. discovery 오류 메시지는 문제가 된 endpoint 이름과 실제 값, 이유를 함께 알려줍니다.
 
@@ -109,7 +113,7 @@ systemd 없이 기동·종료·재기동을 하려면 패키지의 `releasedock.
 
 ```bash
 make package
-# release/releasedock-v0.3.4.tar.gz
+# release/releasedock-v0.4.0.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.
@@ -125,6 +129,7 @@ make package
 - OIDC issuer/JWKS 검증, state/nonce/PKCE, 로그인 state에 고정한 redirect URI 재사용
 - 관리 API 출발지 IP 허용 목록과 신뢰 프록시 기반 X-Forwarded-For 해석
 - 심플 모드는 셸 없는 인자 실행·환경변수 allowlist·프로세스 그룹 정리를 적용하지만, 별도 executor UID 격리 밖에서 실행됩니다
+- 실행 기록과 로그는 본인 것만 조회 가능하며, 전체 조회는 관리 권한과 API key scope를 함께 요구합니다
 - MCP Origin 검증, 인증 및 권한 검사
 - AI endpoint는 관리자 allowlist 설정만 사용하며 streaming을 기본값으로 사용
 

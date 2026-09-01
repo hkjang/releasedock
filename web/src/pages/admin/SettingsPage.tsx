@@ -48,7 +48,7 @@ const metadata: Record<SettingSection, { title: string; description: string; ico
 
 const initialValues: Record<SettingSection, SettingValue> = {
   general: { serviceName: 'ReleaseDock', artifactMaxSizeGb: 20, publicUrl: '', secureCookies: false, allowedOrigins: [] },
-  oidc: { enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: '', scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true, allowInsecureEndpoints: false },
+  oidc: { enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: '', scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true, allowInsecureEndpoints: false, autoLogin: false },
   ai: { enabled: false, baseUrl: '', apiKey: '', model: '', streamingDefault: true, maxTokens: 32768 },
   approval: { enabled: false, protectedEnvironments: '', allowSelfApproval: false, requireRejectComment: true },
   storage: { driver: 'local', localPath: '/var/lib/releasedock/artifacts' },
@@ -125,6 +125,16 @@ function OidcFields({ values, set, disabled }: FieldsProps) {
         placeholder={String(values.effectiveRedirectUri ?? '')}
         helperText="비워 두면 서버가 자동으로 결정합니다. 일반 설정의 공개 HTTPS URL이 있으면 그 값을, 없으면 접속에 사용된 주소를 사용합니다. 특정 값을 강제해야 할 때만 입력하십시오."
       />
+      <FormControlLabel
+        control={<Switch disabled={disabled || !enabled} checked={Boolean(values.autoLogin)} onChange={(e) => set('autoLogin', e.target.checked)} />}
+        label="Keycloak 세션이 있으면 자동 로그인"
+      />
+      {Boolean(values.autoLogin) && (
+        <Alert severity="info">
+          사이트에 접속했을 때 Keycloak 세션이 살아 있으면 로그인 화면 없이 바로 들어갑니다. 세션이 없으면 로그인 화면이 그대로 표시됩니다.
+          브라우저 세션당 한 번만 시도하며, 사용자가 직접 로그아웃한 뒤에는 다시 자동 로그인하지 않습니다.
+        </Alert>
+      )}
       <FormControlLabel
         control={<Switch disabled={disabled || !enabled} checked={Boolean(values.allowInsecureEndpoints)} onChange={(e) => set('allowInsecureEndpoints', e.target.checked)} />}
         label="내부 평문 HTTP endpoint 허용 (폐쇄망)"

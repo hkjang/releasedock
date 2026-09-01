@@ -471,18 +471,55 @@ func (w *simpleRunStream) Write(chunk []byte) (int, error) {
 	return len(chunk), nil
 }
 
+// canReadEveryRun reports whether the caller may see other people's runs.
+// Simple-mode administration is the natural gate: it is already the permission
+// that configures the commands those runs execute.
+func canReadEveryRun(r *http.Request) bool {
+	p, _ := principalFrom(r)
+	return p.Has("admin.simple.read")
+}
+
+// authorizeRun resolves a run the caller is allowed to read. A run belonging to
+// somebody else is reported as missing rather than forbidden so the endpoint
+// does not confirm that an id exists.
+func (s *Server) authorizeRun(r *http.Request, runID string) (string, error) {
+	var actorID string
+	if err := s.store.Pool.QueryRow(r.Context(),
+		`SELECT actor_id FROM simple_runs WHERE id=$1`, runID).Scan(&actorID); err != nil {
+		return "", err
+	}
+	if canReadEveryRun(r) {
+		return actorID, nil
+	}
+	p, _ := principalFrom(r)
+	if actorID != p.UserID {
+		return "", pgx.ErrNoRows
+	}
+	return actorID, nil
+}
+
 func (s *Server) listSimpleRuns(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pagination(r)
-	// A user without simple.read on other people's work still sees their own.
-	mine := r.URL.Query().Get("mine") == "true"
+	// Without simple-mode administration a caller only ever sees their own
+	// runs, regardless of what the query asks for.
 	p, _ := principalFrom(r)
-	actor := ""
-	if mine {
-		actor = p.UserID
+	actor := p.UserID
+	if canReadEveryRun(r) {
+		actor = strings.TrimSpace(r.URL.Query().Get("actor"))
+		if r.URL.Query().Get("mine") == "true" {
+			actor = p.UserID
+		}
+	}
+	status := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("status")))
+	switch status {
+	case "", "PENDING", "RUNNING", "SUCCESS", "FAILED", "TIMEOUT":
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_filter", "status must be PENDING, RUNNING, SUCCESS, FAILED, or TIMEOUT")
+		return
 	}
 	var total int
 	if err := s.store.Pool.QueryRow(r.Context(),
-		`SELECT count(*) FROM simple_runs WHERE ($1='' OR actor_id=$1)`, actor).Scan(&total); err != nil {
+		`SELECT count(*) FROM simple_runs WHERE ($1='' OR actor_id=$1) AND ($2='' OR status=$2)`, actor, status).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not count simple runs")
 		return
 	}
@@ -492,8 +529,8 @@ func (s *Server) listSimpleRuns(w http.ResponseWriter, r *http.Request) {
 		FROM simple_runs run
 		JOIN simple_targets target ON target.id=run.target_id
 		LEFT JOIN users user_account ON user_account.id=run.actor_id
-		WHERE ($1='' OR run.actor_id=$1)
-		ORDER BY run.created_at DESC LIMIT $2 OFFSET $3`, actor, limit, offset)
+		WHERE ($1='' OR run.actor_id=$1) AND ($2='' OR run.status=$2)
+		ORDER BY run.created_at DESC LIMIT $3 OFFSET $4`, actor, status, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not list simple runs")
 		return
@@ -522,6 +559,10 @@ func (s *Server) listSimpleRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
+	if _, err := s.authorizeRun(r, r.PathValue("id")); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
+		return
+	}
 	var id, targetName, filename, storedPath, checksum, status, source, commandPath, errorText, actorName string
 	var args []string
 	var exitCode *int
@@ -568,6 +609,10 @@ func (s *Server) streamSimpleRunLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	runID := r.PathValue("id")
+	if _, err := s.authorizeRun(r, runID); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
+		return
+	}
 	var status string
 	err := s.store.Pool.QueryRow(r.Context(), `SELECT status FROM simple_runs WHERE id=$1`, runID).Scan(&status)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -671,4 +716,90 @@ func (s *Server) resolveSimpleTarget(r *http.Request, targetID string) (simpleTa
 	}
 	return scanSimpleTarget(s.store.Pool.QueryRow(r.Context(),
 		`SELECT `+simpleTargetColumns+` FROM simple_targets WHERE revoked_at IS NULL AND active LIMIT 1`))
+}
+
+// maxSimpleLogPage bounds one page of log lines so a very long run cannot force
+// an unbounded response.
+const maxSimpleLogPage = 2000
+
+// listSimpleRunLogs returns stored output for a run. Unlike the SSE stream this
+// works for a run that already finished, which is what makes the history usable
+// after the fact. `format=text` returns the whole log as a plain download.
+func (s *Server) listSimpleRunLogs(w http.ResponseWriter, r *http.Request) {
+	runID := r.PathValue("id")
+	if _, err := s.authorizeRun(r, runID); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
+		return
+	}
+	if strings.EqualFold(r.URL.Query().Get("format"), "text") {
+		s.downloadSimpleRunLog(w, r, runID)
+		return
+	}
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	limit := maxSimpleLogPage
+	if requested, err := strconv.Atoi(r.URL.Query().Get("limit")); err == nil && requested > 0 && requested < limit {
+		limit = requested
+	}
+	rows, err := s.store.Pool.Query(r.Context(),
+		`SELECT id,stream,payload,created_at FROM simple_run_logs
+		 WHERE run_id=$1 AND id>$2 ORDER BY id LIMIT $3`, runID, after, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database_error", "could not read run logs")
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	var lastID int64
+	for rows.Next() {
+		var id int64
+		var stream string
+		var payload []byte
+		var created time.Time
+		if rows.Scan(&id, &stream, &payload, &created) != nil {
+			writeError(w, http.StatusInternalServerError, "database_error", "could not read run logs")
+			return
+		}
+		items = append(items, map[string]any{"id": id, "stream": stream, "message": string(payload), "createdAt": created})
+		lastID = id
+	}
+	// The caller polls with `after` until hasMore is false, then switches to the
+	// stream if the run is still going.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":   items,
+		"lastId":  lastID,
+		"hasMore": len(items) == limit,
+	})
+}
+
+func (s *Server) downloadSimpleRunLog(w http.ResponseWriter, r *http.Request, runID string) {
+	var filename, status string
+	if err := s.store.Pool.QueryRow(r.Context(),
+		`SELECT original_filename,status FROM simple_runs WHERE id=$1`, runID).Scan(&filename, &status); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
+		return
+	}
+	rows, err := s.store.Pool.Query(r.Context(),
+		`SELECT stream,payload FROM simple_run_logs WHERE run_id=$1 ORDER BY id`, runID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "database_error", "could not read run logs")
+		return
+	}
+	defer rows.Close()
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	// The run id is a UUID, so it is safe inside the header value.
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"releasedock-run-%s.log\"", runID))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	for rows.Next() {
+		var stream string
+		var payload []byte
+		if rows.Scan(&stream, &payload) != nil {
+			return
+		}
+		prefix := ""
+		if stream == "stderr" {
+			prefix = "[stderr] "
+		}
+		fmt.Fprintf(w, "%s%s\n", prefix, payload)
+	}
 }

@@ -20,7 +20,7 @@ import { useVersion } from '../app/VersionContext';
 import { useAuth } from '../auth/AuthContext';
 
 export function LoginPage() {
-  const { user, loading, login } = useAuth();
+  const { user, loading, login, attemptingSso } = useAuth();
   const version = useVersion();
   const navigate = useNavigate();
   const location = useLocation();
@@ -40,6 +40,20 @@ export function LoginPage() {
     return () => { active = false; };
   }, []);
 
+  // The provider had no live session; say so once instead of leaving the
+  // visitor wondering why nothing happened.
+  const ssoOutcome = new URLSearchParams(location.search).get('sso');
+
+  if (attemptingSso) {
+    return (
+      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }} role="status">
+        <Stack alignItems="center" spacing={2}>
+          <CircularProgress />
+          <Typography color="text.secondary">SSO 세션을 확인하는 중입니다</Typography>
+        </Stack>
+      </Box>
+    );
+  }
   if (!loading && user) return <Navigate to="/" replace />;
 
   const submit = async (event: FormEvent) => {
@@ -103,6 +117,8 @@ export function LoginPage() {
             <LockRoundedIcon color="primary" sx={{ fontSize: 40, mb: 1.5 }} />
             <Typography variant="h1" component="h1">로그인</Typography>
             <Typography color="text.secondary" sx={{ mt: 1, mb: 3.5 }}>배포 작업공간에 안전하게 접속하세요.</Typography>
+            {ssoOutcome === 'none' && <Alert severity="info" sx={{ mb: 2.5 }}>SSO 세션이 없어 자동 로그인하지 못했습니다. 아래에서 로그인하십시오.</Alert>}
+            {ssoOutcome === 'error' && <Alert severity="warning" sx={{ mb: 2.5 }}>SSO 인증이 거부되었습니다. 관리자에게 문의하거나 아래에서 로그인하십시오.</Alert>}
             {error && <Alert severity="error" sx={{ mb: 2.5 }}>{error}</Alert>}
             {authConfig.local_enabled && <Box component="form" onSubmit={(event) => void submit(event)} noValidate>
               <Stack spacing={2.25}>

@@ -36,7 +36,10 @@ type oidcSettings struct {
 	// AllowInsecureEndpoints permits plaintext HTTP OIDC endpoints, but only to
 	// non-public hosts. Needed for air-gapped Keycloak without TLS.
 	AllowInsecureEndpoints bool
-	DefaultRoleID          *string
+	// AutoLogin signs a visitor in silently when the identity provider session
+	// is still valid, using prompt=none.
+	AutoLogin     bool
+	DefaultRoleID *string
 }
 
 type oidcDiscovery struct {
@@ -53,12 +56,12 @@ func (s *Server) loadOIDC(ctx context.Context) (oidcSettings, error) {
 
 func loadOIDCWithQueryer(ctx context.Context, queryer dependencyQueryer, forUpdate bool) (oidcSettings, error) {
 	var cfg oidcSettings
-	query := `SELECT enabled,issuer,client_id,client_secret_enc,redirect_url,scopes,auto_create_user,allow_insecure_endpoints,default_role_id FROM oidc_settings WHERE id='default'`
+	query := `SELECT enabled,issuer,client_id,client_secret_enc,redirect_url,scopes,auto_create_user,allow_insecure_endpoints,auto_login,default_role_id FROM oidc_settings WHERE id='default'`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
 	err := queryer.QueryRow(ctx, query).
-		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.AllowInsecureEndpoints, &cfg.DefaultRoleID)
+		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.AllowInsecureEndpoints, &cfg.AutoLogin, &cfg.DefaultRoleID)
 	return cfg, err
 }
 
@@ -146,7 +149,11 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not load authentication configuration")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"local_enabled": true, "oidc": map[string]any{"enabled": cfg.Enabled, "issuer": cfg.Issuer}})
+	// autoLogin is published so the browser knows whether to attempt a silent
+	// sign-in before rendering the login screen.
+	writeJSON(w, http.StatusOK, map[string]any{"local_enabled": true, "oidc": map[string]any{
+		"enabled": cfg.Enabled, "issuer": cfg.Issuer, "autoLogin": cfg.Enabled && cfg.AutoLogin,
+	}})
 }
 
 // privatePlaintextHost reports whether a plaintext endpoint may target this
@@ -285,6 +292,15 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "oidc_redirect_unresolved", "could not determine the OIDC redirect URI for this request")
 		return
 	}
+	// prompt=none asks the provider to answer from an existing session only.
+	// It never renders UI: either a code comes straight back, or an error
+	// such as login_required does.
+	silent := r.URL.Query().Get("prompt") == "none"
+	if silent && !cfg.AutoLogin {
+		// Refusing an unrequested silent attempt keeps the redirect surface
+		// tied to the administrator setting.
+		silent = false
+	}
 	state, _ := secure.RandomToken(32)
 	nonce, _ := secure.RandomToken(24)
 	codeVerifier, _ := secure.RandomToken(32)
@@ -294,7 +310,7 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 	if !safeReturnTo(returnTo) {
 		returnTo = "/"
 	}
-	_, err = s.store.Pool.Exec(r.Context(), `WITH expired AS (DELETE FROM oidc_states WHERE expires_at<now()) INSERT INTO oidc_states(state_hash,nonce,code_verifier,return_to,redirect_uri,expires_at) VALUES($1,$2,$3,$4,$5,now()+interval '10 minutes')`, secure.TokenHash(state), nonce, codeVerifier, returnTo, redirectURI)
+	_, err = s.store.Pool.Exec(r.Context(), `WITH expired AS (DELETE FROM oidc_states WHERE expires_at<now()) INSERT INTO oidc_states(state_hash,nonce,code_verifier,return_to,redirect_uri,silent,expires_at) VALUES($1,$2,$3,$4,$5,$6,now()+interval '10 minutes')`, secure.TokenHash(state), nonce, codeVerifier, returnTo, redirectURI, silent)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not initiate OIDC login")
 		return
@@ -304,6 +320,9 @@ func (s *Server) oidcLogin(w http.ResponseWriter, r *http.Request) {
 		"response_type": {"code"}, "client_id": {cfg.ClientID}, "redirect_uri": {redirectURI},
 		"scope": {strings.Join(cfg.Scopes, " ")}, "state": {state}, "nonce": {nonce},
 		"code_challenge": {codeChallenge}, "code_challenge_method": {"S256"},
+	}
+	if silent {
+		params.Set("prompt", "none")
 	}
 	http.Redirect(w, r, discovery.AuthorizationEndpoint+"?"+params.Encode(), http.StatusFound)
 }
@@ -319,6 +338,26 @@ func safeReturnTo(value string) bool {
 func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
+	// The provider reports a refusal as an error parameter rather than a code.
+	// prompt=none produces login_required here whenever no session exists,
+	// which is an ordinary outcome and must not look like a failure.
+	if providerError := r.URL.Query().Get("error"); providerError != "" {
+		silent := false
+		if state != "" {
+			_ = s.store.Pool.QueryRow(r.Context(),
+				`DELETE FROM oidc_states WHERE state_hash=$1 RETURNING silent`,
+				secure.TokenHash(state)).Scan(&silent)
+		}
+		if silent {
+			// Land on the login page with the marker the browser uses to stop
+			// retrying, so a signed-out visitor is not bounced in a loop.
+			http.Redirect(w, r, "/login?sso=none", http.StatusFound)
+			return
+		}
+		s.log.Warn("OIDC provider returned an error", "error", providerError)
+		http.Redirect(w, r, "/login?sso=error", http.StatusFound)
+		return
+	}
 	stateCookie, cookieErr := r.Cookie("releasedock_oidc_state")
 	if state == "" || code == "" || cookieErr != nil || subtle.ConstantTimeCompare([]byte(state), []byte(stateCookie.Value)) != 1 {
 		writeError(w, http.StatusBadRequest, "invalid_oidc_callback", "missing or invalid OIDC callback parameters")
@@ -326,7 +365,8 @@ func (s *Server) oidcCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{Name: "releasedock_oidc_state", Value: "", Path: "/api/v1/auth/oidc/callback", HttpOnly: true, Secure: s.useSecureCookies(r.Context(), r), SameSite: http.SameSiteLaxMode, MaxAge: -1})
 	var nonce, codeVerifier, returnTo, redirectURI string
-	err := s.store.Pool.QueryRow(r.Context(), `DELETE FROM oidc_states WHERE state_hash=$1 AND expires_at>now() RETURNING nonce,code_verifier,return_to,redirect_uri`, secure.TokenHash(state)).Scan(&nonce, &codeVerifier, &returnTo, &redirectURI)
+	var silent bool
+	err := s.store.Pool.QueryRow(r.Context(), `DELETE FROM oidc_states WHERE state_hash=$1 AND expires_at>now() RETURNING nonce,code_verifier,return_to,redirect_uri,silent`, secure.TokenHash(state)).Scan(&nonce, &codeVerifier, &returnTo, &redirectURI, &silent)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_oidc_state", "OIDC state expired or was already used")
 		return

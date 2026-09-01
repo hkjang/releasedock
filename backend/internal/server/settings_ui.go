@@ -376,6 +376,7 @@ func (s *Server) putOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	autoCreate := settingBool(values, "autoProvision", false)
 	allowInsecure := settingBool(values, "allowInsecureEndpoints", current.AllowInsecureEndpoints)
+	autoLogin := settingBool(values, "autoLogin", current.AutoLogin)
 	if verify, exists := values["verifyTls"].(bool); exists && !verify && enabled {
 		writeError(w, 400, "invalid_oidc_settings", "TLS verification cannot be disabled; install the internal CA in the service trust store")
 		return
@@ -434,7 +435,7 @@ func (s *Server) putOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	delete(values, "clientSecret")
 	encoded, _ := json.Marshal(values)
-	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,default_role_id=$9,config=$10,updated_by=$11,updated_at=now() WHERE id='default'`, enabled, issuer, clientID, secretEnc, redirectURL, scopes, autoCreate, allowInsecure, roleID, encoded, p.UserID)
+	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,auto_login=$9,default_role_id=$10,config=$11,updated_by=$12,updated_at=now() WHERE id='default'`, enabled, issuer, clientID, secretEnc, redirectURL, scopes, autoCreate, allowInsecure, autoLogin, roleID, encoded, p.UserID)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}

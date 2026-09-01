@@ -240,6 +240,7 @@ func (s *Server) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": cfg.Enabled, "issuerUrl": cfg.Issuer, "clientId": cfg.ClientID,
 		"secretConfigured": cfg.ClientSecretEnc != "", "redirectUrl": cfg.RedirectURL,
+		"autoLogin":              cfg.AutoLogin,
 		"allowInsecureEndpoints": cfg.AllowInsecureEndpoints,
 		// Read-only context: the public URL lives in general settings but is what
 		// the redirect URI is derived from, so it is shown where SSO is configured.
@@ -259,6 +260,7 @@ type oidcSettingsInput struct {
 	ClientSecret   *string   `json:"client_secret"`
 	RedirectURL    *string   `json:"redirect_url"`
 	AllowInsecure  *bool     `json:"allow_insecure_endpoints"`
+	AutoLogin      *bool     `json:"auto_login"`
 	Scopes         *[]string `json:"scopes"`
 	AutoCreateUser *bool     `json:"auto_create_user"`
 	DefaultRoleID  *string   `json:"default_role_id"`
@@ -296,6 +298,9 @@ func (s *Server) updateOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if input.RedirectURL != nil {
 		current.RedirectURL = strings.TrimSpace(*input.RedirectURL)
+	}
+	if input.AutoLogin != nil {
+		current.AutoLogin = *input.AutoLogin
 	}
 	if input.AllowInsecure != nil {
 		current.AllowInsecureEndpoints = *input.AllowInsecure
@@ -359,7 +364,7 @@ func (s *Server) updateOIDCSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,default_role_id=$9,updated_by=$10,updated_at=now() WHERE id='default'`, current.Enabled, current.Issuer, current.ClientID, secretEnc, current.RedirectURL, current.Scopes, current.AutoCreateUser, current.AllowInsecureEndpoints, current.DefaultRoleID, p.UserID)
+	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,auto_login=$9,default_role_id=$10,updated_by=$11,updated_at=now() WHERE id='default'`, current.Enabled, current.Issuer, current.ClientID, secretEnc, current.RedirectURL, current.Scopes, current.AutoCreateUser, current.AllowInsecureEndpoints, current.AutoLogin, current.DefaultRoleID, p.UserID)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}

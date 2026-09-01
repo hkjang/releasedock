@@ -133,6 +133,8 @@ export interface AuthConfig {
   oidc: {
     enabled: boolean;
     issuer?: string;
+    /** Try a prompt=none sign-in before showing the login screen. */
+    autoLogin?: boolean;
   };
 }
 
@@ -181,6 +183,13 @@ export interface SimpleTarget {
   maxUploadBytes: number;
   ready: boolean;
   notReadyReason: string;
+}
+
+export interface SimpleLogLine {
+  id: number;
+  stream: 'stdout' | 'stderr' | 'system';
+  message: string;
+  createdAt: string;
 }
 
 export interface SimpleRun {
@@ -306,6 +315,7 @@ function serializeSettings(section: SettingSection, value: SettingValue): Settin
       autoProvision: Boolean(value.autoProvision),
       defaultRole: value.defaultRole || 'viewer',
       allowInsecureEndpoints: Boolean(value.allowInsecureEndpoints),
+      autoLogin: Boolean(value.autoLogin),
       verifyTls: true,
     };
     if (value.clientSecret) result.clientSecret = value.clientSecret;
@@ -478,9 +488,16 @@ export const api = {
   setPreferredUiMode: (mode: 'simple' | 'full') =>
     request<void>('/me/preferences', { method: 'PATCH', body: { uiMode: mode } }),
   simpleTargets: () => request<{ items: SimpleTarget[]; commandMode: string }>('/simple/targets'),
-  simpleRuns: (params: ListParams = {}, mine = false) =>
-    request<PageResult<SimpleRun>>(`/simple/runs${toListQuery(params)}${mine ? (toListQuery(params) ? '&' : '?') + 'mine=true' : ''}`),
+  simpleRuns: (params: ListParams = {}, mine = false, actor = '') =>
+    request<PageResult<SimpleRun>>(
+      `/simple/runs${toListQuery(params)}${toListQuery(params) ? '&' : '?'}mine=${mine}${actor ? `&actor=${encodeURIComponent(actor)}` : ''}`,
+    ),
   simpleRun: (id: string) => request<SimpleRun>(`/simple/runs/${encodeURIComponent(id)}`),
+  simpleRunLogs: (id: string, after = 0) =>
+    request<{ items: SimpleLogLine[]; lastId: number; hasMore: boolean }>(
+      `/simple/runs/${encodeURIComponent(id)}/logs?after=${after}`,
+    ),
+  simpleRunLogDownloadUrl: (id: string) => `${API_BASE}/simple/runs/${encodeURIComponent(id)}/logs?format=text`,
   // targetId may be empty: the server uses the only active target, which is
   // what lets the deploy screen accept a bare drag-and-drop.
   startSimpleRun: (targetId: string, artifact: File) => {

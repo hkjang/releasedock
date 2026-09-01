@@ -16,6 +16,7 @@ import { ReleasesPage } from '../pages/releases/ReleasesPage';
 import { NewReleasePage } from '../pages/releases/NewReleasePage';
 import { AdvancedReleasePage } from '../pages/releases/AdvancedReleasePage';
 import { SimpleDeployPage } from '../pages/simple/SimpleDeployPage';
+import { SimpleRunDetailPage } from '../pages/simple/SimpleRunDetailPage';
 import { SimpleRunsPage } from '../pages/simple/SimpleRunsPage';
 import { ForbiddenPage, NotFoundPage } from '../pages/SystemPages';
 import { UiModeProvider, useUiMode } from './UiModeContext';
@@ -35,6 +36,7 @@ export function App() {
                   <Route index element={<HomeRoute />} />
                   <Route path="simple" element={<RequirePermission permission="simple.deploy"><SimpleDeployPage /></RequirePermission>} />
                   <Route path="simple/runs" element={<RequirePermission permission="simple.read"><SimpleRunsPage /></RequirePermission>} />
+                  <Route path="simple/runs/:id" element={<RequirePermission permission="simple.read"><SimpleRunDetailPage /></RequirePermission>} />
                   <Route path="releases" element={<RequirePermission permission="releases.read"><ReleasesPage /></RequirePermission>} />
                   <Route path="releases/new" element={<RequirePermission permission="releases.create"><NewReleasePage /></RequirePermission>} />
                   <Route path="releases/new/advanced" element={<RequirePermission permission="releases.create"><RequirePermission permission="applications.read"><RequirePermission permission="profiles.read"><AdvancedReleasePage /></RequirePermission></RequirePermission></RequirePermission>} />

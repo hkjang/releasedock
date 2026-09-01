@@ -110,6 +110,7 @@ const sections: NavSection[] = [
       { label: '릴리즈', path: '/releases', icon: RocketLaunchRoundedIcon, permission: 'releases.read' },
       { label: '새 버전 배포', path: '/releases/new', icon: PlaylistAddRoundedIcon, permission: 'releases.create' },
       { label: '심플 배포', path: '/simple', icon: DnsRoundedIcon, permission: 'simple.deploy' },
+      { label: '심플 실행 기록', path: '/simple/runs', icon: HistoryRoundedIcon, permission: 'simple.read' },
     ],
   },
   {

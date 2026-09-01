@@ -234,6 +234,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/simple/runs", s.withPermission("simple.deploy", s.createSimpleRun))
 	mux.HandleFunc("GET /api/v1/simple/runs", s.withPermission("simple.read", s.listSimpleRuns))
 	mux.HandleFunc("GET /api/v1/simple/runs/{id}", s.withPermission("simple.read", s.getSimpleRun))
+	mux.HandleFunc("GET /api/v1/simple/runs/{id}/logs", s.withPermission("simple.read", s.listSimpleRunLogs))
 	mux.HandleFunc("GET /api/v1/simple/runs/{id}/logs/stream", s.withPermission("simple.read", s.streamSimpleRunLogs))
 
 	mux.HandleFunc("POST /api/v1/runner/heartbeat", s.runnerHeartbeat)

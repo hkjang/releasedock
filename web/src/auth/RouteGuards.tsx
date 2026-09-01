@@ -15,9 +15,11 @@ function FullScreenLoading() {
 }
 
 export function RequireAuth() {
-  const { user, loading } = useAuth();
+  const { user, loading, attemptingSso } = useAuth();
   const location = useLocation();
-  if (loading) return <FullScreenLoading />;
+  // While a silent SSO redirect is in flight the browser is about to leave
+  // this document; rendering the login screen first would flash it.
+  if (loading || attemptingSso) return <FullScreenLoading />;
   if (!user) return <Navigate to="/login" state={{ from: location }} replace />;
   return <Outlet />;
 }

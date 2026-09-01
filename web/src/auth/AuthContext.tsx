@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { api, ApiError } from '../api/client';
+import { beginSilentSso, clearSilentSsoState, loadAuthConfig, markSignedOut, shouldAttemptSilentSso } from './silentSso';
 import type { User } from '../types/domain';
 
 interface AuthContextValue {
@@ -9,6 +10,8 @@ interface AuthContextValue {
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
   isAdmin: boolean;
+  /** True while the browser is being redirected for a silent SSO attempt. */
+  attemptingSso: boolean;
   hasPermission: (permission: string) => boolean;
 }
 
@@ -18,15 +21,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User>();
   const [loading, setLoading] = useState(true);
 
+  // A silent SSO attempt is made once, before anything renders, so a visitor
+  // with a live Keycloak session never sees the login screen at all.
+  const [attemptingSso, setAttemptingSso] = useState(false);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setUser(await api.me());
+      const current = await api.me();
+      setUser(current);
+      clearSilentSsoState();
     } catch (error) {
-      if (error instanceof ApiError && (error.status === 401 || error.status === 403)) {
-        setUser(undefined);
-      } else {
-        setUser(undefined);
+      setUser(undefined);
+      // Only an unauthenticated visitor is a candidate; a permission
+      // failure means the session is fine and must not trigger a redirect.
+      if (error instanceof ApiError && error.status === 401) {
+        const config = await loadAuthConfig();
+        if (config && shouldAttemptSilentSso(config)) {
+          setAttemptingSso(true);
+          beginSilentSso(`${window.location.pathname}${window.location.search}`);
+          return;
+        }
       }
     } finally {
       setLoading(false);
@@ -40,10 +55,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = useCallback(async (username: string, password: string) => {
     const result = await api.login(username, password);
     setUser(result.user);
+    clearSilentSsoState();
     return result.user;
   }, []);
 
   const logout = useCallback(async () => {
+    // An explicit sign-out must stick even while the Keycloak session is
+    // still alive, otherwise auto-login would immediately undo it.
+    markSignedOut();
     try {
       await api.logout();
     } finally {
@@ -58,6 +77,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<AuthContextValue>(
     () => ({
+      attemptingSso,
       user,
       loading,
       login,
@@ -66,7 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAdmin: Boolean(user?.roles.some((role) => role.toLowerCase() === 'admin') || user?.permissions?.some((permission) => permission.startsWith('admin.'))),
       hasPermission,
     }),
-    [user, loading, login, logout, refresh, hasPermission],
+    [user, loading, attemptingSso, login, logout, refresh, hasPermission],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
