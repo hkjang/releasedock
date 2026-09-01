@@ -16,6 +16,8 @@ import { ReleasesPage } from '../pages/releases/ReleasesPage';
 import { NewReleasePage } from '../pages/releases/NewReleasePage';
 import { AdvancedReleasePage } from '../pages/releases/AdvancedReleasePage';
 import { SimpleDeployPage } from '../pages/simple/SimpleDeployPage';
+import { GuideDetailPage } from '../pages/guides/GuideDetailPage';
+import { GuidesPage } from '../pages/guides/GuidesPage';
 import { SimpleRunDetailPage } from '../pages/simple/SimpleRunDetailPage';
 import { SimpleRunsPage } from '../pages/simple/SimpleRunsPage';
 import { ForbiddenPage, NotFoundPage } from '../pages/SystemPages';
@@ -43,6 +45,8 @@ export function App() {
                   <Route path="releases/:id" element={<RequirePermission permission="releases.read"><ReleaseDetailPage /></RequirePermission>} />
                   <Route path="personal/profile" element={<ProfilePage />} />
                   <Route path="personal/api-keys" element={<RequirePermission permission="keys.manage"><ApiKeysPage /></RequirePermission>} />
+                  <Route path="guides" element={<RequirePermission permission="guides.read"><GuidesPage /></RequirePermission>} />
+                  <Route path="guides/:id" element={<RequirePermission permission="guides.read"><GuideDetailPage /></RequirePermission>} />
                   <Route path="forbidden" element={<ForbiddenPage />} />
 
                   <Route path="admin/applications" element={<RequirePermission permission="applications.read"><AdminResourcePage config={resourceConfigs.applications} /></RequirePermission>} />
@@ -62,6 +66,7 @@ export function App() {
                   <Route path="admin/settings/approval" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="approval" /></RequirePermission>} />
                   <Route path="admin/settings/storage" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="storage" /></RequirePermission>} />
                   <Route path="admin/settings/runner" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="runner" /></RequirePermission>} />
+                  <Route path="admin/guides" element={<RequirePermission permission="admin.guides.read"><AdminResourcePage config={resourceConfigs.guides} /></RequirePermission>} />
                   <Route path="admin/simple-targets" element={<RequirePermission permission="admin.simple.read"><AdminResourcePage config={resourceConfigs.simpleTargets} /></RequirePermission>} />
                   <Route path="admin/settings/simple" element={<RequirePermission permission="admin.simple.read"><SettingsPage section="simple" /></RequirePermission>} />
                   <Route path="admin/settings/network" element={<RequirePermission permission="admin.settings.read"><SettingsPage section="network" /></RequirePermission>} />

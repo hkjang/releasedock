@@ -456,3 +456,18 @@ func (s *Server) listRegistryReplicationPolicies(w http.ResponseWriter, r *http.
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "registryName": registry.Name})
 }
+
+// checkRegistryHarbor runs a connection test against a registry and returns the
+// individual probe results. This exists because a bare 404 from the replication
+// API has several unrelated causes and an operator cannot tell them apart from
+// the failure alone.
+func (s *Server) checkRegistryHarbor(w http.ResponseWriter, r *http.Request) {
+	registry, err := s.loadHarborRegistry(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "Harbor Registry 를 찾을 수 없습니다")
+		return
+	}
+	ctx, cancel := contextWithTimeout(r, 30*time.Second)
+	defer cancel()
+	writeJSON(w, http.StatusOK, s.diagnoseHarbor(ctx, registry))
+}

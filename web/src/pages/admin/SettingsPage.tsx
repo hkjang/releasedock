@@ -27,7 +27,7 @@ import {
 } from '@mui/material';
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { api, unwrapItems, type ReplicationPolicy } from '../../api/client';
+import { api, unwrapItems, type HarborDiagnosis, type ReplicationPolicy } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { PageError, PageLoading } from '../../components/Feedback';
 import { PageHeader } from '../../components/PageHeader';
@@ -405,6 +405,24 @@ function ReplicationFields({ values, set, disabled }: FieldsProps) {
   const [policies, setPolicies] = useState<ReplicationPolicy[]>([]);
   const [policyError, setPolicyError] = useState('');
   const [loadingPolicies, setLoadingPolicies] = useState(false);
+  const [diagnosis, setDiagnosis] = useState<HarborDiagnosis>();
+  const [checking, setChecking] = useState(false);
+
+  const runCheck = async () => {
+    setChecking(true);
+    setDiagnosis(undefined);
+    try {
+      setDiagnosis(await api.harborCheck(registryId));
+    } catch (cause) {
+      setDiagnosis({
+        registryName: '', endpoint: '', username: '', robotPrefix: false, probes: [],
+        verdict: 'unreachable',
+        detail: cause instanceof Error ? cause.message : '진단하지 못했습니다.',
+      });
+    } finally {
+      setChecking(false);
+    }
+  };
 
   // Rules are read from the selected Harbor so an operator picks a name rather
   // than typing an opaque id.
@@ -472,6 +490,41 @@ function ReplicationFields({ values, set, disabled }: FieldsProps) {
           </MenuItem>
         ))}
       </TextField>
+
+      <Stack direction="row" spacing={1.5} alignItems="center">
+        <Button
+          variant="outlined"
+          disabled={!registryId || checking}
+          onClick={() => void runCheck()}
+          startIcon={checking ? <CircularProgress size={16} /> : undefined}
+        >
+          {checking ? '진단 중…' : 'Harbor 연결 진단'}
+        </Button>
+        <Typography variant="caption" color="text.secondary">
+          복제 규칙이 보이지 않을 때 원인을 확인합니다.
+        </Typography>
+      </Stack>
+
+      {diagnosis && (
+        <Alert severity={diagnosis.verdict === 'ok' ? 'success' : diagnosis.verdict === 'unauthorized' || diagnosis.verdict === 'unreachable' ? 'error' : 'warning'}>
+          <Typography fontWeight={700} sx={{ mb: 0.5 }}>{diagnosis.detail}</Typography>
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            계정 {diagnosis.username || '(없음)'}
+            {diagnosis.robotPrefix ? '' : ' · robot$ 접두어 없음'}
+          </Typography>
+          <Box component="table" sx={{ borderCollapse: 'collapse', fontSize: 13, width: '100%' }}>
+            <tbody>
+              {diagnosis.probes.map((probe) => (
+                <Box component="tr" key={probe.name}>
+                  <Box component="td" sx={{ pr: 2, py: 0.25, whiteSpace: 'nowrap', fontFamily: 'monospace' }}>{probe.name}</Box>
+                  <Box component="td" sx={{ pr: 2, py: 0.25, fontWeight: 700 }}>{probe.error ? '연결 실패' : probe.status}</Box>
+                  <Box component="td" sx={{ py: 0.25, color: 'text.secondary', wordBreak: 'break-all' }}>{probe.error || probe.url}</Box>
+                </Box>
+              ))}
+            </tbody>
+          </Box>
+        </Alert>
+      )}
 
       <TextField
         select

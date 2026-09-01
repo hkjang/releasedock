@@ -17,6 +17,7 @@ import LanRoundedIcon from '@mui/icons-material/LanRounded';
 import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
 import MenuRoundedIcon from '@mui/icons-material/MenuRounded';
 import MemoryRoundedIcon from '@mui/icons-material/MemoryRounded';
+import MenuBookRoundedIcon from '@mui/icons-material/MenuBookRounded';
 import PersonRoundedIcon from '@mui/icons-material/PersonRounded';
 import PlaylistAddRoundedIcon from '@mui/icons-material/PlaylistAddRounded';
 import RocketLaunchRoundedIcon from '@mui/icons-material/RocketLaunchRounded';
@@ -76,6 +77,7 @@ const simpleSections: NavSection[] = [
     items: [
       { label: '배포', path: '/simple', icon: PlaylistAddRoundedIcon, permission: 'simple.deploy' },
       { label: '실행 기록', path: '/simple/runs', icon: HistoryRoundedIcon, permission: 'simple.read' },
+      { label: '사용자 가이드', path: '/guides', icon: MenuBookRoundedIcon, permission: 'guides.read' },
     ],
   },
   {
@@ -85,6 +87,7 @@ const simpleSections: NavSection[] = [
     items: [
       { label: '심플 대상', path: '/admin/simple-targets', icon: DnsRoundedIcon, permission: 'admin.simple.read' },
       { label: '심플 모드 설정', path: '/admin/settings/simple', icon: TuneRoundedIcon, permission: 'admin.simple.read' },
+      { label: '가이드 게시판', path: '/admin/guides', icon: MenuBookRoundedIcon, permission: 'admin.guides.read' },
       // 일반 설정 holds the public HTTPS URL that OIDC redirect derivation
       // reads, so simple mode must not hide it.
       { label: '일반 설정', path: '/admin/settings/general', icon: SettingsRoundedIcon, permission: 'admin.settings.read' },
@@ -111,6 +114,7 @@ const sections: NavSection[] = [
       { label: '새 버전 배포', path: '/releases/new', icon: PlaylistAddRoundedIcon, permission: 'releases.create' },
       { label: '심플 배포', path: '/simple', icon: DnsRoundedIcon, permission: 'simple.deploy' },
       { label: '심플 실행 기록', path: '/simple/runs', icon: HistoryRoundedIcon, permission: 'simple.read' },
+      { label: '사용자 가이드', path: '/guides', icon: MenuBookRoundedIcon, permission: 'guides.read' },
     ],
   },
   {
@@ -137,6 +141,7 @@ const sections: NavSection[] = [
       { label: '감사 로그', path: '/admin/audit', icon: HistoryRoundedIcon, permission: 'audit.read' },
       { label: '심플 대상', path: '/admin/simple-targets', icon: DnsRoundedIcon, permission: 'admin.simple.read' },
       { label: '심플 모드 설정', path: '/admin/settings/simple', icon: TuneRoundedIcon, permission: 'admin.simple.read' },
+      { label: '가이드 게시판', path: '/admin/guides', icon: MenuBookRoundedIcon, permission: 'admin.guides.read' },
       { label: '관리자 접근 IP', path: '/admin/settings/network', icon: LanRoundedIcon, permission: 'admin.settings.read' },
     ],
   },

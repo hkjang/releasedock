@@ -86,6 +86,10 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 관리 화면에서 관리 기능을 사용할 수 있는 출발지 IP 허용 목록을 관리합니다. `/api/v1/admin/` 이하의 모든 관리 API에 적용되며, 자기 자신을 잠그는 저장은 거부되고 루프백은 항상 허용됩니다. 리버스 프록시 뒤에서 운영한다면 신뢰 프록시 CIDR을 함께 등록해야 합니다.
 
+## 사용자 가이드 게시판
+
+관리자가 가이드·공지·FAQ 게시글을 작성하면 사용자 화면의 **사용자 가이드** 메뉴에 표시됩니다. 본문은 Markdown 일부(제목·목록·코드블록·인용·굵게·인라인 코드)를 지원하며 **HTML 은 해석하지 않습니다.** 설치 시 심플 모드 배포 가이드가 하나 들어 있습니다.
+
 ## Standalone 기동
 
 웹 포털은 서버 바이너리에 내장되어 있습니다. 따라서 **실행 파일 하나와 환경 파일 하나**만 있으면 심플 모드가 완전히 동작하며, 별도의 `web/` 디렉터리가 필요하지 않습니다.
@@ -115,7 +119,7 @@ systemd 없이 기동·종료·재기동을 하려면 패키지의 `releasedock.
 
 ```bash
 make package
-# release/releasedock-v0.4.1.tar.gz
+# release/releasedock-v0.4.2.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.
@@ -132,6 +136,7 @@ make package
 - 관리 API 출발지 IP 허용 목록과 신뢰 프록시 기반 X-Forwarded-For 해석
 - 심플 모드는 셸 없는 인자 실행·환경변수 allowlist·프로세스 그룹 정리를 적용하지만, 별도 executor UID 격리 밖에서 실행됩니다
 - 실행 기록과 로그는 본인 것만 조회 가능하며, 전체 조회는 관리 권한과 API key scope를 함께 요구합니다
+- 가이드 게시글 본문은 React 요소로 조립하여 HTML을 해석하지 않으므로 게시글을 통한 스크립트 주입이 불가능합니다
 - MCP Origin 검증, 인증 및 권한 검사
 - AI endpoint는 관리자 allowlist 설정만 사용하며 streaming을 기본값으로 사용
 

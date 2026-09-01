@@ -175,6 +175,37 @@ export interface UiModeInfo {
   commandMode: 'PER_TARGET' | 'SHARED';
 }
 
+export interface GuidePost {
+  id: string;
+  title: string;
+  summary: string;
+  body: string;
+  category: string;
+  pinned: boolean;
+  sortOrder?: number;
+  published?: boolean;
+  author: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HarborProbe {
+  name: string;
+  url: string;
+  status: number;
+  error?: string;
+}
+
+export interface HarborDiagnosis {
+  registryName: string;
+  endpoint: string;
+  username: string;
+  robotPrefix: boolean;
+  probes: HarborProbe[];
+  verdict: string;
+  detail: string;
+}
+
 export interface ReplicationPolicy {
   id: number;
   name: string;
@@ -500,6 +531,8 @@ export const api = {
     const response = await request<{ items: Array<{ code: string; description: string }> }>('/admin/permissions');
     return response.items ?? [];
   },
+  guides: () => request<{ items: GuidePost[] }>('/guides'),
+  guide: (id: string) => request<GuidePost>(`/guides/${encodeURIComponent(id)}`),
   uiMode: () => request<UiModeInfo>('/ui-mode'),
   setPreferredUiMode: (mode: 'simple' | 'full') =>
     request<void>('/me/preferences', { method: 'PATCH', body: { uiMode: mode } }),
@@ -513,6 +546,8 @@ export const api = {
     request<{ items: SimpleLogLine[]; lastId: number; hasMore: boolean }>(
       `/simple/runs/${encodeURIComponent(id)}/logs?after=${after}`,
     ),
+  harborCheck: (registryId: string) =>
+    request<HarborDiagnosis>(`/admin/registries/${encodeURIComponent(registryId)}/harbor-check`, { method: 'POST' }),
   replicationPolicies: (registryId: string) =>
     request<{ items: ReplicationPolicy[]; registryName: string }>(
       `/admin/registries/${encodeURIComponent(registryId)}/replication-policies`,

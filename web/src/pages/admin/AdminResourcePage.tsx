@@ -113,6 +113,20 @@ export const resourceConfigs = {
     columns: [{ key: 'name', label: '서비스' }, { key: 'artifactPrefix', label: '파일명 접두어' }, { key: 'applicationName', label: '애플리케이션' }, { key: 'environmentName', label: '배포 대상' }, { key: 'deploymentProfileName', label: '운영 정책' }, { key: 'autoDeployAfterApproval', label: '승인 후 자동 시작', status: true }, { key: 'active', label: '상태', status: true }],
     fields: [{ key: 'name', label: '사용자 표시 이름', required: true, helperText: '예: AI Portal 운영' }, { key: 'artifactPrefix', label: '파일명 접두어', required: true, pattern: /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/, helperText: '1~64자의 영문 소문자·숫자·내부 하이픈만 사용합니다. 예: ai-portal' }, { key: 'applicationId', label: '애플리케이션', required: true, relation: 'applications' }, { key: 'environmentId', label: '배포 대상', required: true, relation: 'environments' }, { key: 'deploymentProfileId', label: '운영 정책', required: true, relation: 'profiles', helperText: '선택한 서비스와 배포 대상에 맞는 정책만 표시됩니다.' }, { key: 'autoDeployAfterApproval', label: '승인 후 자동으로 배포 시작', type: 'boolean', defaultValue: true }, { key: 'active', label: '활성화', type: 'boolean', defaultValue: true }],
   },
+  guides: {
+    title: '사용자 가이드 게시판', description: '사용자 화면에 표시할 가이드·공지·FAQ 게시글을 관리합니다.', singular: '게시글', endpoint: '/admin/guides',
+    writePermission: 'admin.guides.write',
+    columns: [{ key: 'title', label: '제목' }, { key: 'category', label: '분류' }, { key: 'pinned', label: '상단 고정', status: true }, { key: 'sortOrder', label: '순서' }, { key: 'published', label: '공개', status: true }, { key: 'updatedAt', label: '수정' }],
+    fields: [
+      { key: 'title', label: '제목', required: true },
+      { key: 'category', label: '분류', type: 'select', required: true, defaultValue: 'GUIDE', options: [{ label: '가이드', value: 'GUIDE' }, { label: '공지', value: 'NOTICE' }, { label: '자주 묻는 질문', value: 'FAQ' }] },
+      { key: 'summary', label: '요약', type: 'multiline', helperText: '목록에 함께 표시됩니다. 500자까지.' },
+      { key: 'body', label: '본문', type: 'multiline', required: true, helperText: 'Markdown 일부를 지원합니다: # 제목, - 목록, 1. 번호 목록, ``` 코드블록, > 인용, --- 구분선, **굵게**, `코드`. HTML 은 해석하지 않습니다.' },
+      { key: 'pinned', label: '상단 고정', type: 'boolean', defaultValue: false },
+      { key: 'sortOrder', label: '정렬 순서', type: 'number', defaultValue: 100, helperText: '작은 값이 먼저 표시됩니다.' },
+      { key: 'published', label: '공개', type: 'boolean', defaultValue: true, helperText: '끄면 사용자 화면에 표시되지 않습니다.' },
+    ],
+  },
   simpleTargets: {
     title: '심플 대상', description: '심플 모드에서 사용자가 고를 배포 대상입니다. 업로드 경로와 실행할 명령을 지정합니다.', singular: '심플 대상', endpoint: '/admin/simple-targets',
     writePermission: 'admin.simple.write',
