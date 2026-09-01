@@ -14,6 +14,7 @@ import {
   Card,
   CardContent,
   Checkbox,
+  Divider,
   CircularProgress,
   FormControlLabel,
   InputAdornment,
@@ -24,9 +25,9 @@ import {
   TextField,
   Typography,
 } from '@mui/material';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Link as RouterLink } from 'react-router-dom';
-import { api } from '../../api/client';
+import { api, unwrapItems, type ReplicationPolicy } from '../../api/client';
 import { useAuth } from '../../auth/AuthContext';
 import { PageError, PageLoading } from '../../components/Feedback';
 import { PageHeader } from '../../components/PageHeader';
@@ -391,6 +392,131 @@ function NetworkFields({ values, set, disabled }: FieldsProps) {
   );
 }
 
+function ReplicationFields({ values, set, disabled }: FieldsProps) {
+  const enabled = Boolean(values.replicationEnabled);
+  const registryId = String(values.replicationRegistryId ?? '');
+  const registries = useAsync(async () => {
+    const response = await api.getResource<{ id: string; name: string; endpoint: string; active?: boolean }>(
+      '/admin/registries',
+      { page: 1, pageSize: 200 },
+    );
+    return unwrapItems(response).filter((item) => item.active !== false);
+  }, []);
+  const [policies, setPolicies] = useState<ReplicationPolicy[]>([]);
+  const [policyError, setPolicyError] = useState('');
+  const [loadingPolicies, setLoadingPolicies] = useState(false);
+
+  // Rules are read from the selected Harbor so an operator picks a name rather
+  // than typing an opaque id.
+  const loadPolicies = useCallback(async (id: string) => {
+    if (!id) {
+      setPolicies([]);
+      setPolicyError('');
+      return;
+    }
+    setLoadingPolicies(true);
+    setPolicyError('');
+    try {
+      const response = await api.replicationPolicies(id);
+      setPolicies(response.items);
+      if (!response.items.length) setPolicyError('이 Harbor 에 복제 규칙이 없습니다. Harbor 에서 먼저 규칙을 만드십시오.');
+    } catch (cause) {
+      setPolicies([]);
+      setPolicyError(cause instanceof Error ? cause.message : '복제 규칙을 불러오지 못했습니다.');
+    } finally {
+      setLoadingPolicies(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadPolicies(registryId);
+  }, [registryId, loadPolicies]);
+
+  const selectedPolicy = policies.find((policy) => policy.id === Number(values.replicationPolicyId));
+
+  return (
+    <Stack spacing={2.25}>
+      <FormControlLabel
+        control={
+          <Switch
+            disabled={disabled}
+            checked={enabled}
+            onChange={(e) => set('replicationEnabled', e.target.checked)}
+          />
+        }
+        label="배포 성공 후 Harbor 복제 규칙 실행"
+      />
+      <Alert severity={enabled ? 'warning' : 'info'}>
+        {enabled
+          ? '배포 명령이 exit 0 으로 끝나면 아래 복제 규칙을 실행하고 완료될 때까지 기다립니다. 복제가 실패하면 실행 기록도 실패로 남습니다.'
+          : '켜면 배포 명령이 성공한 뒤 지정한 Harbor 복제 규칙을 자동으로 실행합니다. 명령이 실패하면 복제하지 않습니다.'}
+      </Alert>
+
+      <TextField
+        select
+        label="Harbor Registry"
+        disabled={disabled || registries.loading}
+        value={registryId}
+        onChange={(e) => {
+          set('replicationRegistryId', e.target.value);
+          set('replicationPolicyId', 0);
+          set('replicationPolicyName', '');
+        }}
+        helperText={registries.error ? `레지스트리를 불러오지 못했습니다: ${registries.error.message}` : 'Harbor Registry 화면에 등록된 레지스트리에서 고릅니다.'}
+        fullWidth
+      >
+        <MenuItem value="">선택 안 함</MenuItem>
+        {(registries.data ?? []).map((registry) => (
+          <MenuItem key={registry.id} value={registry.id}>
+            {registry.name} ({registry.endpoint})
+          </MenuItem>
+        ))}
+      </TextField>
+
+      <TextField
+        select
+        label="복제 규칙"
+        disabled={disabled || !registryId || loadingPolicies}
+        value={policies.length ? String(values.replicationPolicyId ?? 0) : ''}
+        onChange={(e) => {
+          const id = Number(e.target.value);
+          set('replicationPolicyId', id);
+          set('replicationPolicyName', policies.find((policy) => policy.id === id)?.name ?? '');
+        }}
+        helperText={
+          loadingPolicies
+            ? 'Harbor 에서 복제 규칙을 불러오는 중입니다…'
+            : policyError || (selectedPolicy?.enabled === false
+              ? '이 규칙은 Harbor 에서 비활성 상태입니다. 실행해도 아무것도 복제되지 않을 수 있습니다.'
+              : 'Harbor 에 설정된 복제 규칙 중 하나를 고릅니다.')
+        }
+        error={Boolean(policyError)}
+        fullWidth
+      >
+        <MenuItem value="0">선택 안 함</MenuItem>
+        {policies.map((policy) => (
+          <MenuItem key={policy.id} value={String(policy.id)}>
+            {policy.name}
+            {policy.destination ? ` → ${policy.destination}` : ''}
+            {policy.enabled ? '' : ' (비활성)'}
+          </MenuItem>
+        ))}
+      </TextField>
+
+      <TextField
+        label="복제 완료 대기 제한 시간 (초)"
+        type="number"
+        disabled={disabled}
+        value={Number(values.replicationTimeoutSeconds ?? 900)}
+        onChange={(e) => set('replicationTimeoutSeconds', Number(e.target.value))}
+        inputProps={{ min: 1, max: 86400 }}
+        helperText="이 시간 안에 복제가 끝나지 않으면 실행 기록을 시간 초과로 남깁니다. 기본 900초."
+        fullWidth
+      />
+    </Stack>
+  );
+}
+
 export function SettingsPage({ section }: { section: SettingSection }) {
   const { hasPermission } = useAuth();
   // Simple mode has its own permission pair; the rest share admin.settings.*.
@@ -442,6 +568,8 @@ export function SettingsPage({ section }: { section: SettingSection }) {
             {section === 'storage' && <StorageFields values={values} set={set} disabled={!canWrite} />}
             {section === 'runner' && <RunnerFields values={values} set={set} disabled={!canWrite} />}
             {section === 'simple' && <SimpleFields values={values} set={set} disabled={!canWrite} />}
+            {section === 'simple' && <Divider sx={{ my: 3 }} />}
+            {section === 'simple' && <ReplicationFields values={values} set={set} disabled={!canWrite} />}
             {section === 'network' && <NetworkFields values={values} set={set} disabled={!canWrite} />}
           </SettingCard>
         </Stack>

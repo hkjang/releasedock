@@ -182,6 +182,19 @@ export function SimpleRunDetailPage() {
               <Detail label="시작" value={formatDate(detail.startedAt ?? undefined)} />
               <Detail label="종료" value={formatDate(detail.finishedAt ?? undefined)} />
               <Detail label="소요 시간" value={duration} />
+              {detail.replicationStatus && detail.replicationStatus !== 'NONE' && (
+                <Detail
+                  label="Harbor 복제"
+                  value={
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Chip size="small" label={detail.replicationStatus} color={statusColor(detail.replicationStatus)} />
+                      {Boolean(detail.replicationExecutionId) && (
+                        <Typography variant="body2" color="text.secondary">execution {detail.replicationExecutionId}</Typography>
+                      )}
+                    </Stack>
+                  }
+                />
+              )}
             </Box>
           </CardContent>
         </Card>

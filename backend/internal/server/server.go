@@ -223,6 +223,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/admin/simple-targets/{id}", s.withSessionPermission("admin.simple.write", s.revokeSimpleTarget))
 	mux.HandleFunc("GET /api/v1/admin/settings/network", s.withPermission("admin.settings.read", s.getNetworkSettings))
 	mux.HandleFunc("PUT /api/v1/admin/settings/network", s.withSessionPermission("admin.settings.write", s.putNetworkSettings))
+	mux.HandleFunc("GET /api/v1/admin/registries/{id}/replication-policies", s.withPermission("admin.registries.read", s.listRegistryReplicationPolicies))
 	mux.HandleFunc("GET /api/v1/admin/settings/simple", s.withPermission("admin.simple.read", s.getSimpleSettings))
 	mux.HandleFunc("PUT /api/v1/admin/settings/simple", s.withSessionPermission("admin.simple.write", s.putSimpleSettings))
 	mux.HandleFunc("GET /api/v1/ui-mode", s.withAuth(s.uiMode))

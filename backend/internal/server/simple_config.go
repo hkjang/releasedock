@@ -23,25 +23,40 @@ const (
 )
 
 type simpleSettings struct {
-	DefaultUIMode        string    `json:"defaultUiMode"`
-	CommandMode          string    `json:"commandMode"`
-	SharedCommandPath    string    `json:"sharedCommandPath"`
-	SharedCommandArgs    []string  `json:"sharedCommandArgs"`
-	SharedWorkingDir     string    `json:"sharedWorkingDir"`
-	SharedTimeoutSeconds int       `json:"sharedTimeoutSeconds"`
-	UploadRoot           string    `json:"uploadRoot"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	DefaultUIMode        string   `json:"defaultUiMode"`
+	CommandMode          string   `json:"commandMode"`
+	SharedCommandPath    string   `json:"sharedCommandPath"`
+	SharedCommandArgs    []string `json:"sharedCommandArgs"`
+	SharedWorkingDir     string   `json:"sharedWorkingDir"`
+	SharedTimeoutSeconds int      `json:"sharedTimeoutSeconds"`
+	UploadRoot           string   `json:"uploadRoot"`
+	// Replication is triggered only after the command succeeds, so a failed
+	// deployment never mirrors a half-applied state.
+	ReplicationEnabled  bool      `json:"replicationEnabled"`
+	ReplicationRegistry string    `json:"replicationRegistryId"`
+	ReplicationPolicyID int64     `json:"replicationPolicyId"`
+	ReplicationPolicy   string    `json:"replicationPolicyName"`
+	ReplicationTimeout  int       `json:"replicationTimeoutSeconds"`
+	UpdatedAt           time.Time `json:"updatedAt"`
 }
 
 func loadSimpleSettings(ctx context.Context, q interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }) (simpleSettings, error) {
 	var cfg simpleSettings
+	var registryID *string
 	err := q.QueryRow(ctx, `SELECT default_ui_mode,command_mode,shared_command_path,shared_command_args,
-		shared_working_dir,shared_timeout_seconds,upload_root,updated_at
+		shared_working_dir,shared_timeout_seconds,upload_root,replication_enabled,
+		replication_registry_id::text,COALESCE(replication_policy_id,0),replication_policy_name,
+		replication_timeout_seconds,updated_at
 		FROM simple_settings WHERE id='default'`).
 		Scan(&cfg.DefaultUIMode, &cfg.CommandMode, &cfg.SharedCommandPath, &cfg.SharedCommandArgs,
-			&cfg.SharedWorkingDir, &cfg.SharedTimeoutSeconds, &cfg.UploadRoot, &cfg.UpdatedAt)
+			&cfg.SharedWorkingDir, &cfg.SharedTimeoutSeconds, &cfg.UploadRoot, &cfg.ReplicationEnabled,
+			&registryID, &cfg.ReplicationPolicyID, &cfg.ReplicationPolicy,
+			&cfg.ReplicationTimeout, &cfg.UpdatedAt)
+	if registryID != nil {
+		cfg.ReplicationRegistry = *registryID
+	}
 	if cfg.SharedCommandArgs == nil {
 		cfg.SharedCommandArgs = []string{}
 	}

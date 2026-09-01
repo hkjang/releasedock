@@ -1,4 +1,3 @@
-import DnsRoundedIcon from '@mui/icons-material/DnsRounded';
 import LockRoundedIcon from '@mui/icons-material/LockRounded';
 import LoginRoundedIcon from '@mui/icons-material/LoginRounded';
 import {
@@ -92,9 +91,7 @@ export function LoginPage() {
         }}
       >
         <Stack direction="row" alignItems="center" spacing={1.5}>
-          <Box sx={{ display: 'grid', placeItems: 'center', width: 46, height: 46, borderRadius: 2.5, color: '#07121f', background: 'linear-gradient(145deg, #78b7ff, #45dbb4)' }}>
-            <DnsRoundedIcon />
-          </Box>
+          <Box component="img" src="/favicon.svg" alt="" aria-hidden="true" sx={{ width: 46, height: 46, borderRadius: 2.5 }} />
           <Typography variant="h2">ReleaseDock</Typography>
         </Stack>
         <Box sx={{ maxWidth: 700 }}>

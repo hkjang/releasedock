@@ -175,6 +175,14 @@ export interface UiModeInfo {
   commandMode: 'PER_TARGET' | 'SHARED';
 }
 
+export interface ReplicationPolicy {
+  id: number;
+  name: string;
+  description: string;
+  enabled: boolean;
+  destination: string;
+}
+
 export interface SimpleTarget {
   id: string;
   name: string;
@@ -207,6 +215,9 @@ export interface SimpleRun {
   sha256?: string;
   timeoutSeconds?: number;
   actorName?: string;
+  replicationStatus?: 'NONE' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
+  replicationExecutionId?: number;
+  replicationError?: string;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -295,6 +306,11 @@ function serializeSettings(section: SettingSection, value: SettingValue): Settin
       sharedWorkingDir: String(value.sharedWorkingDir ?? ''),
       sharedTimeoutSeconds: Number(value.sharedTimeoutSeconds ?? 600),
       uploadRoot: String(value.uploadRoot ?? ''),
+      replicationEnabled: Boolean(value.replicationEnabled),
+      replicationRegistryId: String(value.replicationRegistryId ?? ''),
+      replicationPolicyId: Number(value.replicationPolicyId ?? 0),
+      replicationPolicyName: String(value.replicationPolicyName ?? ''),
+      replicationTimeoutSeconds: Number(value.replicationTimeoutSeconds ?? 900),
     };
   }
   if (section === 'network') {
@@ -496,6 +512,10 @@ export const api = {
   simpleRunLogs: (id: string, after = 0) =>
     request<{ items: SimpleLogLine[]; lastId: number; hasMore: boolean }>(
       `/simple/runs/${encodeURIComponent(id)}/logs?after=${after}`,
+    ),
+  replicationPolicies: (registryId: string) =>
+    request<{ items: ReplicationPolicy[]; registryName: string }>(
+      `/admin/registries/${encodeURIComponent(registryId)}/replication-policies`,
     ),
   simpleRunLogDownloadUrl: (id: string) => `${API_BASE}/simple/runs/${encodeURIComponent(id)}/logs?format=text`,
   // targetId may be empty: the server uses the only active target, which is

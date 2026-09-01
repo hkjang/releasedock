@@ -357,9 +357,33 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 	logs.system(fmt.Sprintf("exit=%d status=%s duration=%s", result.ExitCode, status, result.Duration.Round(time.Millisecond)))
 	logs.flush()
 
+	// Replication runs only after a clean command, and its result is part
+	// of the run outcome: mirroring that never happened must not be
+	// reported as a green deployment.
+	replicationStatus := "NONE"
+	var replicationExecutionID int64
+	replicationError := ""
+	// Read at the end of the run so a rule enabled during a long deployment
+	// still applies, and a rule disabled meanwhile is honoured.
+	cfg, cfgErr := loadSimpleSettings(ctx, s.store.Pool)
+	if cfgErr != nil {
+		s.log.Warn("could not load simple settings for replication", "run", runID, "error", cfgErr)
+	}
+	if cfgErr == nil && status == "SUCCESS" && cfg.ReplicationEnabled && cfg.ReplicationRegistry != "" && cfg.ReplicationPolicyID > 0 {
+		replicationStatus, replicationExecutionID, replicationError = s.runReplication(ctx, cfg, runID, logs)
+		logs.flush()
+		if replicationStatus != "SUCCESS" {
+			status = "FAILED"
+			message = "배포 명령은 성공했으나 복제에 실패했습니다: " + replicationError
+		}
+	}
+
 	if _, err := s.store.Pool.Exec(ctx, `UPDATE simple_runs
-		SET status=$2,exit_code=$3,error=$4,finished_at=now() WHERE id=$1`,
-		runID, status, result.ExitCode, message); err != nil {
+		SET status=$2,exit_code=$3,error=$4,replication_status=$5,
+		    replication_execution_id=NULLIF($6,0),replication_error=$7,finished_at=now()
+		WHERE id=$1`,
+		runID, status, result.ExitCode, message,
+		replicationStatus, replicationExecutionID, replicationError); err != nil {
 		s.log.Error("could not record simple run outcome", "run", runID, "error", err)
 	}
 	s.store.Audit(ctx, actorID, "simple_run."+strings.ToLower(status), "simple_run", runID, strings.ToLower(status), "", "", nil)
@@ -564,6 +588,8 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var id, targetName, filename, storedPath, checksum, status, source, commandPath, errorText, actorName string
+	var replicationStatus, replicationError string
+	var replicationExecutionID int64
 	var args []string
 	var exitCode *int
 	var size int64
@@ -573,13 +599,16 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 	err := s.store.Pool.QueryRow(r.Context(), `SELECT run.id::text,target.name,run.original_filename,
 		run.stored_path,run.sha256,run.status,run.command_source,run.resolved_command_path,
 		run.resolved_command_args,run.resolved_timeout_seconds,run.exit_code,run.error,run.size_bytes,
+		run.replication_status,COALESCE(run.replication_execution_id,0),run.replication_error,
 		run.created_at,run.started_at,run.finished_at,COALESCE(user_account.display_name,'')
 		FROM simple_runs run
 		JOIN simple_targets target ON target.id=run.target_id
 		LEFT JOIN users user_account ON user_account.id=run.actor_id
 		WHERE run.id=$1`, r.PathValue("id")).
 		Scan(&id, &targetName, &filename, &storedPath, &checksum, &status, &source, &commandPath,
-			&args, &timeout, &exitCode, &errorText, &size, &created, &startedAt, &finishedAt, &actorName)
+			&args, &timeout, &exitCode, &errorText, &size,
+			&replicationStatus, &replicationExecutionID, &replicationError,
+			&created, &startedAt, &finishedAt, &actorName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
 		return
@@ -596,7 +625,9 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 		"sha256": checksum, "status": status, "commandSource": source, "commandPath": commandPath,
 		"commandArgs": args, "timeoutSeconds": timeout, "exitCode": exitCode, "error": errorText,
 		"sizeBytes": size, "createdAt": created, "startedAt": startedAt, "finishedAt": finishedAt,
-		"actorName": actorName,
+		"actorName":         actorName,
+		"replicationStatus": replicationStatus, "replicationExecutionId": replicationExecutionID,
+		"replicationError": replicationError,
 	})
 }
 
@@ -801,5 +832,81 @@ func (s *Server) downloadSimpleRunLog(w http.ResponseWriter, r *http.Request, ru
 			prefix = "[stderr] "
 		}
 		fmt.Fprintf(w, "%s%s\n", prefix, payload)
+	}
+}
+
+// runReplication triggers the configured Harbor rule and waits for it to
+// finish, reporting progress into the run log. It is called only after the
+// deployment command succeeded, so a failed deployment never mirrors a
+// half-applied state.
+func (s *Server) runReplication(ctx context.Context, cfg simpleSettings, runID string, logs *simpleRunLogger) (status string, executionID int64, failure string) {
+	registry, err := s.loadHarborRegistry(ctx, cfg.ReplicationRegistry)
+	if err != nil {
+		message := "복제 레지스트리를 사용할 수 없습니다: " + err.Error()
+		logs.system("[replication] " + message)
+		return "FAILED", 0, message
+	}
+	label := cfg.ReplicationPolicy
+	if label == "" {
+		label = fmt.Sprintf("#%d", cfg.ReplicationPolicyID)
+	}
+	logs.system(fmt.Sprintf("[replication] %s 규칙 %s 시작", registry.Name, label))
+
+	executionID, err = s.startReplication(ctx, registry, cfg.ReplicationPolicyID)
+	if err != nil {
+		logs.system("[replication] 실패: " + err.Error())
+		return "FAILED", 0, err.Error()
+	}
+	if executionID == 0 {
+		// Harbor accepted the trigger but did not identify the execution, so
+		// there is nothing to poll. Reporting success here would be a guess.
+		logs.system("[replication] 요청은 접수됐으나 실행 ID를 확인하지 못해 상태를 추적하지 않습니다")
+		return "SUCCESS", 0, ""
+	}
+
+	timeout := time.Duration(cfg.ReplicationTimeout) * time.Second
+	if timeout <= 0 {
+		timeout = 15 * time.Minute
+	}
+	deadline := time.Now().Add(timeout)
+	started := time.Now()
+	lastReported := ""
+	for {
+		if time.Now().After(deadline) {
+			message := fmt.Sprintf("복제가 제한 시간 %s 안에 끝나지 않았습니다 (execution %d)", timeout, executionID)
+			logs.system("[replication] " + message)
+			return "TIMEOUT", executionID, message
+		}
+		select {
+		case <-ctx.Done():
+			return "FAILED", executionID, "복제 대기가 취소되었습니다"
+		case <-time.After(3 * time.Second):
+		}
+		execution, err := s.replicationExecution(ctx, registry, executionID)
+		if err != nil {
+			// A transient read failure should not abandon a replication that
+			// is still progressing; the deadline is the real bound.
+			continue
+		}
+		if execution.Status != lastReported {
+			logs.system(fmt.Sprintf("[replication] %s (성공 %d / 실패 %d / 전체 %d)",
+				execution.Status, execution.Succeed, execution.Failed, execution.Total))
+			lastReported = execution.Status
+		}
+		done, ok := replicationTerminal(execution.Status)
+		if !done {
+			continue
+		}
+		elapsed := time.Since(started).Round(time.Second)
+		if ok {
+			logs.system(fmt.Sprintf("[replication] 성공 (%s)", elapsed))
+			return "SUCCESS", executionID, ""
+		}
+		message := fmt.Sprintf("복제가 %s 상태로 끝났습니다 (실패 %d건)", execution.Status, execution.Failed)
+		if execution.StatusTx != "" {
+			message += ": " + execution.StatusTx
+		}
+		logs.system("[replication] " + message)
+		return "FAILED", executionID, message
 	}
 }

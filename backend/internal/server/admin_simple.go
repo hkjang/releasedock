@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/hkjang/releasedock/backend/internal/secure"
 	"github.com/jackc/pgx/v5"
@@ -252,6 +253,11 @@ type simpleSettingsInput struct {
 	SharedCommandArgs    *string `json:"sharedCommandArgs"`
 	SharedWorkingDir     *string `json:"sharedWorkingDir"`
 	SharedTimeoutSeconds *int    `json:"sharedTimeoutSeconds"`
+	ReplicationEnabled   *bool   `json:"replicationEnabled"`
+	ReplicationRegistry  *string `json:"replicationRegistryId"`
+	ReplicationPolicyID  *int64  `json:"replicationPolicyId"`
+	ReplicationPolicy    *string `json:"replicationPolicyName"`
+	ReplicationTimeout   *int    `json:"replicationTimeoutSeconds"`
 	UploadRoot           *string `json:"uploadRoot"`
 }
 
@@ -266,6 +272,11 @@ func (s *Server) getSimpleSettings(w http.ResponseWriter, r *http.Request) {
 		"sharedCommandPath": cfg.SharedCommandPath, "sharedCommandArgs": joinCommandArgs(cfg.SharedCommandArgs),
 		"sharedWorkingDir": cfg.SharedWorkingDir, "sharedTimeoutSeconds": cfg.SharedTimeoutSeconds,
 		"uploadRoot": cfg.UploadRoot, "updatedAt": cfg.UpdatedAt,
+		"replicationEnabled":        cfg.ReplicationEnabled,
+		"replicationRegistryId":     cfg.ReplicationRegistry,
+		"replicationPolicyId":       cfg.ReplicationPolicyID,
+		"replicationPolicyName":     cfg.ReplicationPolicy,
+		"replicationTimeoutSeconds": cfg.ReplicationTimeout,
 	})
 }
 
@@ -320,6 +331,38 @@ func (s *Server) putSimpleSettings(w http.ResponseWriter, r *http.Request) {
 	if input.SharedTimeoutSeconds != nil {
 		cfg.SharedTimeoutSeconds = *input.SharedTimeoutSeconds
 	}
+	if input.ReplicationEnabled != nil {
+		cfg.ReplicationEnabled = *input.ReplicationEnabled
+	}
+	if input.ReplicationRegistry != nil {
+		cfg.ReplicationRegistry = strings.TrimSpace(*input.ReplicationRegistry)
+	}
+	if input.ReplicationPolicyID != nil {
+		cfg.ReplicationPolicyID = *input.ReplicationPolicyID
+	}
+	if input.ReplicationPolicy != nil {
+		cfg.ReplicationPolicy = strings.TrimSpace(*input.ReplicationPolicy)
+	}
+	if input.ReplicationTimeout != nil {
+		cfg.ReplicationTimeout = *input.ReplicationTimeout
+	}
+	if cfg.ReplicationTimeout < 1 || cfg.ReplicationTimeout > 86400 {
+		writeError(w, http.StatusBadRequest, "invalid_simple_settings", "복제 제한 시간은 1초 이상 86400초 이하여야 합니다")
+		return
+	}
+	// Enabling without a rule would fail on every deployment, so the pair
+	// is required up front rather than discovered at run time.
+	if cfg.ReplicationEnabled {
+		if cfg.ReplicationRegistry == "" || cfg.ReplicationPolicyID <= 0 {
+			writeError(w, http.StatusBadRequest, "invalid_simple_settings", "복제를 사용하려면 레지스트리와 복제 규칙을 함께 선택해야 합니다")
+			return
+		}
+		var exists bool
+		if err := tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM runner_credentials WHERE id=$1 AND active AND revoked_at IS NULL)`, cfg.ReplicationRegistry).Scan(&exists); err != nil || !exists {
+			writeError(w, http.StatusBadRequest, "invalid_simple_settings", "선택한 Harbor Registry 를 사용할 수 없습니다")
+			return
+		}
+	}
 	if input.CommandMode != nil {
 		mode := strings.ToUpper(strings.TrimSpace(*input.CommandMode))
 		if mode != commandModePerTarget && mode != commandModeShared {
@@ -344,9 +387,13 @@ func (s *Server) putSimpleSettings(w http.ResponseWriter, r *http.Request) {
 
 	_, err = tx.Exec(r.Context(), `UPDATE simple_settings SET default_ui_mode=$1,command_mode=$2,
 		shared_command_path=$3,shared_command_args=$4,shared_working_dir=$5,shared_timeout_seconds=$6,
-		upload_root=$7,updated_by=$8,updated_at=now() WHERE id='default'`,
+		upload_root=$7,replication_enabled=$8,replication_registry_id=NULLIF($9,'')::uuid,
+		replication_policy_id=NULLIF($10,0),replication_policy_name=$11,
+		replication_timeout_seconds=$12,updated_by=$13,updated_at=now() WHERE id='default'`,
 		cfg.DefaultUIMode, cfg.CommandMode, cfg.SharedCommandPath, cfg.SharedCommandArgs,
-		cfg.SharedWorkingDir, cfg.SharedTimeoutSeconds, cfg.UploadRoot, p.UserID)
+		cfg.SharedWorkingDir, cfg.SharedTimeoutSeconds, cfg.UploadRoot,
+		cfg.ReplicationEnabled, cfg.ReplicationRegistry, cfg.ReplicationPolicyID,
+		cfg.ReplicationPolicy, cfg.ReplicationTimeout, p.UserID)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}
@@ -379,4 +426,33 @@ func (s *Server) checkCommandModeSwitch(ctx context.Context, tx pgx.Tx, cfg simp
 		return errors.New("서비스별 명령 모드로 바꾸려면 활성 대상 모두에 실행 명령을 먼저 설정해야 합니다")
 	}
 	return nil
+}
+
+// listRegistryReplicationPolicies fetches the replication rules configured on a
+// Harbor so the simple-mode settings screen can offer them by name. Reading
+// them requires registry access because the call authenticates with that
+// registry's stored robot credential.
+func (s *Server) listRegistryReplicationPolicies(w http.ResponseWriter, r *http.Request) {
+	registry, err := s.loadHarborRegistry(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "Harbor Registry 를 찾을 수 없습니다")
+		return
+	}
+	ctx, cancel := contextWithTimeout(r, 20*time.Second)
+	defer cancel()
+	policies, err := s.listReplicationPolicies(ctx, registry)
+	if err != nil {
+		// A reachability or credential problem is the administrator's to fix,
+		// so the message is passed through rather than flattened.
+		writeError(w, http.StatusBadGateway, "harbor_unavailable", err.Error())
+		return
+	}
+	items := make([]map[string]any, 0, len(policies))
+	for _, policy := range policies {
+		items = append(items, map[string]any{
+			"id": policy.ID, "name": policy.Name, "description": policy.Description,
+			"enabled": policy.Enabled, "destination": policy.Destination,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "registryName": registry.Name})
 }

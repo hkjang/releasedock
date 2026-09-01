@@ -165,20 +165,12 @@ function Logo() {
   return (
     <Stack direction="row" alignItems="center" spacing={1.3} sx={{ minWidth: 0 }}>
       <Box
+        component="img"
+        src="/favicon.svg"
+        alt=""
         aria-hidden="true"
-        sx={{
-          width: 38,
-          height: 38,
-          borderRadius: 2.25,
-          display: 'grid',
-          placeItems: 'center',
-          color: '#06111f',
-          background: 'linear-gradient(145deg, #78b7ff, #45dbb4)',
-          boxShadow: '0 8px 22px rgba(72, 160, 235, .28)',
-        }}
-      >
-        <DnsRoundedIcon fontSize="small" />
-      </Box>
+        sx={{ width: 38, height: 38, borderRadius: 2.25, boxShadow: '0 8px 22px rgba(72, 160, 235, .28)' }}
+      />
       <Box sx={{ minWidth: 0 }}>
         <Typography fontWeight={800} letterSpacing="-.02em" noWrap>
           ReleaseDock

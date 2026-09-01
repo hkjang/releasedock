@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="ReleaseDock">
+  <title>ReleaseDock</title>
+  <defs>
+    <linearGradient id="rd" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#78b7ff"/>
+      <stop offset="1" stop-color="#45dbb4"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#rd)"/>
+  <!-- Release: a package pushed upward. Dock: the bar it is placed onto. -->
+  <path d="M32 11 L45 26 H37 V41 H27 V26 H19 Z" fill="#06111f"/>
+  <rect x="16" y="45" width="32" height="7" rx="3.5" fill="#06111f"/>
+</svg>
