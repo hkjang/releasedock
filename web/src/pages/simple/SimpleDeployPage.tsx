@@ -17,7 +17,7 @@ import {
 import CloudUploadRoundedIcon from '@mui/icons-material/CloudUploadRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
-import { api, ApiError, type SimpleTarget } from '../../api/client';
+import { api, ApiError, type SimpleRun, type SimpleTarget } from '../../api/client';
 import { PageHeader } from '../../components/PageHeader';
 import { formatBytes } from '../../utils/format';
 
@@ -67,6 +67,32 @@ function acceptableName(name: string): boolean {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// A stage scoped to run once per upload is deferred to the package the client
+// marked as the last of the batch, and that marker is decided when a package
+// is uploaded. So an upload that never reaches its last package - the user
+// stopped the remaining files, or the last upload was rejected - leaves the
+// deferred stages with no run to carry them: the packages that did deploy
+// report success while nothing was mirrored and the application was never
+// rolled over. The two helpers below detect exactly that.
+
+// stagesDeferred reports whether a finished run pushed a stage onto the last
+// package of its upload. SKIPPED is the only status that means "not here".
+export function stagesDeferred(run: Pick<SimpleRun, 'replicationStatus' | 'appDeployStatus'>): boolean {
+  return run.replicationStatus === 'SKIPPED' || run.appDeployStatus === 'SKIPPED';
+}
+
+// stagesReached reports whether the run that was supposed to carry the
+// deferred stages actually got to them. A run that never started is absent,
+// and a run whose own command failed stops before the stages and leaves them
+// NONE. A stage that ran and failed counts as reached: its error is already
+// reported on that run, so there is nothing extra to warn about.
+export function stagesReached(run?: Pick<SimpleRun, 'replicationStatus' | 'appDeployStatus'>): boolean {
+  if (!run) return false;
+  return [run.replicationStatus, run.appDeployStatus].some(
+    (status) => status !== undefined && status !== 'NONE' && status !== 'SKIPPED',
+  );
+}
+
 // Groups the runs one click produces. The server only ever echoes and groups
 // on it, so a random token is enough; crypto.randomUUID is not available on
 // pages served over plain HTTP in every browser, hence the fallback.
@@ -85,6 +111,7 @@ export function SimpleDeployPage() {
   const [loading, setLoading] = useState(true);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState('');
+  const [stranded, setStranded] = useState(false);
   const [activeRunId, setActiveRunId] = useState('');
   const [logs, setLogs] = useState<LogLine[]>([]);
   const logEndRef = useRef<HTMLDivElement>(null);
@@ -172,12 +199,12 @@ export function SimpleDeployPage() {
 
   // Runs are strictly sequential: the database permits only one in-flight run
   // per target, so a parallel upload of several files would be rejected.
-  const waitForTerminal = async (runId: string): Promise<{ status: string; exitCode: number | null; error?: string }> => {
+  const waitForTerminal = async (runId: string): Promise<SimpleRun> => {
     for (;;) {
       await sleep(1500);
       try {
         const run = await api.simpleRun(runId);
-        if (TERMINAL.includes(run.status)) return { status: run.status, exitCode: run.exitCode, error: run.error };
+        if (TERMINAL.includes(run.status)) return run;
       } catch {
         // A transient read failure should not abandon a run that is still going.
       }
@@ -194,6 +221,7 @@ export function SimpleDeployPage() {
     cancelledRef.current = false;
     setRunning(true);
     setError('');
+    setStranded(false);
     setLogs([]);
 
     // Every file of one click shares a batch id, and the last one is marked.
@@ -201,8 +229,13 @@ export function SimpleDeployPage() {
     // replication, the app deployment command — fire on that marked run, so
     // they happen after every package has been uploaded and deployed.
     const batchId = newBatchId();
+    // Whether any package pushed a stage onto the marked package, and what
+    // became of that package. Compared once the queue is done.
+    let deferredStages = false;
+    let markedRun: SimpleRun | undefined;
 
     for (const [index, item] of pending.entries()) {
+      const marked = index === pending.length - 1;
       if (cancelledRef.current) {
         patchItem(item.key, { status: 'SKIPPED' });
         continue;
@@ -213,7 +246,7 @@ export function SimpleDeployPage() {
       try {
         const created = await api.startSimpleRun(targetId, item.file, {
           id: batchId,
-          last: index === pending.length - 1,
+          last: marked,
         });
         runId = created.id;
         patchItem(item.key, { status: 'RUNNING', runId });
@@ -230,9 +263,12 @@ export function SimpleDeployPage() {
         exitCode: outcome.exitCode,
         error: outcome.error,
       });
+      if (stagesDeferred(outcome)) deferredStages = true;
+      if (marked) markedRun = outcome;
     }
     setActiveRunId('');
     setRunning(false);
+    setStranded(deferredStages && !stagesReached(markedRun));
   };
 
   const queuedCount = queue.filter((item) => item.status === 'QUEUED').length;
@@ -255,6 +291,14 @@ export function SimpleDeployPage() {
       )}
 
       {error && <Alert severity="error" onClose={() => setError('')}>{error}</Alert>}
+
+      {stranded && (
+        <Alert severity="warning" onClose={() => setStranded(false)}>
+          업로드당 한 번만 실행하도록 설정된 단계(복제·앱 배포)가 마지막 패키지로 미뤄졌으나, 그 패키지가 배포되지
+          않아 실행되지 않았습니다. 앞서 배포된 패키지의 이미지는 아직 복제되지 않았으므로 남은 패키지를 다시
+          배포하십시오.
+        </Alert>
+      )}
 
       {Boolean(targets.length) && (
         <Card>
