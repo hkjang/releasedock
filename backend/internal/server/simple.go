@@ -407,6 +407,8 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 	cfg, cfgErr := loadSimpleSettings(ctx, s.store.Pool)
 	if cfgErr != nil {
 		s.log.Warn("could not load simple settings for post-run stages", "run", runID, "error", cfgErr)
+		logs.system("[post-deploy] 배포 후 단계 설정을 읽지 못해 복제와 앱 배포를 실행하지 못했습니다: " + cfgErr.Error())
+		status, message = outcomeWithoutStageSettings(status, message, cfgErr)
 	}
 	if cfgErr == nil && status == "SUCCESS" {
 		if cfg.ReplicationEnabled && cfg.ReplicationRegistry != "" && cfg.ReplicationPolicyID > 0 {

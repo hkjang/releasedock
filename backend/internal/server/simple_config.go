@@ -116,6 +116,21 @@ func appDeployStageRuns(scope string, batchLast bool, replicationStatus string) 
 	return stageRuns(scope, batchLast)
 }
 
+// outcomeWithoutStageSettings decides the outcome of a run whose settings
+// could not be read once the deployment command finished. Whether replication
+// and the application deployment were expected is exactly what those settings
+// hold, so a run that could not read them has no ground to report a green
+// deployment: the very state the stage ordering exists to prevent - an image
+// that was never mirrored, an application that was never rolled over - would
+// look like a success. A run that already failed keeps its own cause, which is
+// the more useful one.
+func outcomeWithoutStageSettings(status, message string, err error) (string, string) {
+	if err == nil || status != "SUCCESS" {
+		return status, message
+	}
+	return "FAILED", "배포 명령은 성공했으나 배포 후 단계 설정을 읽지 못해 복제와 앱 배포를 실행하지 못했습니다: " + err.Error()
+}
+
 // resolvedCommand is the command a run will actually execute, frozen at the
 // moment the run is created so later settings changes cannot rewrite history.
 type resolvedCommand struct {

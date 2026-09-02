@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,6 +208,30 @@ func TestAppDeployWaitsForADeferredReplication(t *testing.T) {
 	}
 	if appDeployStageRuns(stageScopeOnce, false, stageStatusSkipped) {
 		t.Fatal("both conditions together must still hold the app deploy back")
+	}
+}
+
+// The settings say whether replication and the application deployment were
+// expected at all, so a run that could not read them cannot claim the stages
+// were not needed: reporting SUCCESS there would show an unmirrored image as a
+// green deployment.
+func TestOutcomeWithoutStageSettingsFailsARunThatSkippedTheStages(t *testing.T) {
+	status, message := outcomeWithoutStageSettings("SUCCESS", "", errors.New("connection refused"))
+	if status != "FAILED" {
+		t.Fatalf("status = %s, want FAILED", status)
+	}
+	if !strings.Contains(message, "connection refused") {
+		t.Fatalf("the message must carry the cause, got %q", message)
+	}
+	// A run that already failed keeps its own cause, which explains more.
+	status, message = outcomeWithoutStageSettings("TIMEOUT", "제한 시간 10m0s를 초과하여 종료했습니다", errors.New("connection refused"))
+	if status != "TIMEOUT" || !strings.Contains(message, "제한 시간") {
+		t.Fatalf("a failed run must keep its own outcome, got %s %q", status, message)
+	}
+	// Settings that loaded leave the outcome to the stages themselves.
+	status, message = outcomeWithoutStageSettings("SUCCESS", "", nil)
+	if status != "SUCCESS" || message != "" {
+		t.Fatalf("a loaded configuration must not change the outcome, got %s %q", status, message)
 	}
 }
 
