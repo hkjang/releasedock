@@ -30,6 +30,14 @@ const (
 	stageScopeOnce = "ONCE"
 )
 
+// A stage that is off leaves NONE, one that was left for another run of the
+// same upload leaves SKIPPED, and neither counts as a failure.
+const (
+	stageStatusNone    = "NONE"
+	stageStatusSkipped = "SKIPPED"
+	stageStatusSuccess = "SUCCESS"
+)
+
 type simpleSettings struct {
 	DefaultUIMode        string   `json:"defaultUiMode"`
 	CommandMode          string   `json:"commandMode"`
@@ -93,6 +101,19 @@ func loadSimpleSettings(ctx context.Context, q interface {
 // packages that came before it have all been deployed by then.
 func stageRuns(scope string, batchLast bool) bool {
 	return scope != stageScopeOnce || batchLast
+}
+
+// appDeployStageRuns adds one condition to the application deployment on top
+// of its own scope: it waits for replication. A replication deferred to the
+// last package of the upload has not mirrored anything yet, so rolling the
+// application over now would deploy images the registry never received - the
+// very state the stage ordering exists to prevent. The deferred replication
+// and this stage then both happen on the last run of the batch.
+func appDeployStageRuns(scope string, batchLast bool, replicationStatus string) bool {
+	if replicationStatus == stageStatusSkipped {
+		return false
+	}
+	return stageRuns(scope, batchLast)
 }
 
 // resolvedCommand is the command a run will actually execute, frozen at the
