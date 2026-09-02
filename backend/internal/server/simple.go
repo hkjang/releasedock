@@ -397,10 +397,10 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 	// The two post-deployment stages run only after a clean command, and their
 	// results are part of the run outcome: mirroring or an app deployment that
 	// never happened must not be reported as a green deployment.
-	replicationStatus := "NONE"
+	replicationStatus := stageStatusNone
 	var replicationExecutionID int64
 	replicationError := ""
-	appDeployStatus := "NONE"
+	appDeployStatus := stageStatusNone
 	appDeployError := ""
 	// Read at the end of the run so a stage enabled during a long deployment
 	// still applies, and a stage disabled meanwhile is honoured.
@@ -411,7 +411,7 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 	if cfgErr == nil && status == "SUCCESS" {
 		if cfg.ReplicationEnabled && cfg.ReplicationRegistry != "" && cfg.ReplicationPolicyID > 0 {
 			if !stageRuns(cfg.ReplicationScope, batch.Last) {
-				replicationStatus = "SKIPPED"
+				replicationStatus = stageStatusSkipped
 				logs.system("[replication] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
 			} else {
 				replicationStatus, replicationExecutionID, replicationError = s.runReplication(ctx, cfg, runID, logs)
@@ -424,10 +424,16 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 		} else if cfg.AppDeployEnabled && cfg.AppDeployPath != "" {
 			// Deploying an image that was never mirrored is exactly what the
 			// ordering exists to prevent, so this is reached only on a
-			// replication that succeeded or was not asked for.
-			if !stageRuns(cfg.AppDeployScope, batch.Last) {
-				appDeployStatus = "SKIPPED"
-				logs.system("[app-deploy] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
+			// replication that succeeded or was not asked for. A replication
+			// merely deferred to the last package has not mirrored anything
+			// yet, so the application deployment waits for it there too.
+			if !appDeployStageRuns(cfg.AppDeployScope, batch.Last, replicationStatus) {
+				appDeployStatus = stageStatusSkipped
+				if replicationStatus == stageStatusSkipped {
+					logs.system("[app-deploy] 복제를 마지막 파일에서 실행하므로 앱 배포도 마지막 파일에서 실행합니다")
+				} else {
+					logs.system("[app-deploy] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
+				}
 			} else {
 				appDeployStatus, appDeployError = s.runAppDeploy(ctx, cfg, runID, logs, target, artifact, filename, checksum, actorID)
 			}
@@ -981,7 +987,7 @@ func (s *Server) runReplication(ctx context.Context, cfg simpleSettings, runID s
 // stageFailed reads a post-deployment stage outcome. A stage that never ran,
 // deliberately or because it is off, is not a failure; anything else is.
 func stageFailed(status string) bool {
-	return status != "NONE" && status != "SKIPPED" && status != "SUCCESS"
+	return status != stageStatusNone && status != stageStatusSkipped && status != stageStatusSuccess
 }
 
 // runAppDeploy runs the configured application deployment command. It is a

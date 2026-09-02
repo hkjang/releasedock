@@ -676,7 +676,7 @@ function AppDeployFields({ values, set, disabled }: FieldsProps) {
         onChange={(scope) => set('appDeployScope', scope)}
         disabled={disabled}
         onceHelp="여러 파일을 올려도 마지막 파일에서 앱 배포를 한 번만 실행합니다."
-        eachHelp="파일마다 앱 배포 명령을 실행합니다."
+        eachHelp="파일마다 앱 배포 명령을 실행합니다. 다만 복제를 '업로드당 한 번' 으로 두었다면 앱 배포도 마지막 파일까지 기다립니다."
       />
     </Stack>
   );

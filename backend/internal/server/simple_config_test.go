@@ -185,6 +185,31 @@ func TestStageRunsHonoursTheConfiguredScope(t *testing.T) {
 	}
 }
 
+// The application deployment must never run ahead of a replication that was
+// only deferred: on the packages before the last one nothing has been mirrored
+// yet, so rolling the application over there would deploy images the registry
+// never received.
+func TestAppDeployWaitsForADeferredReplication(t *testing.T) {
+	if appDeployStageRuns(stageScopeEach, false, stageStatusSkipped) {
+		t.Fatal("a per-file app deploy must wait for a replication deferred to the last package")
+	}
+	if !appDeployStageRuns(stageScopeEach, true, stageStatusSuccess) {
+		t.Fatal("the last run of the batch must deploy once replication succeeded")
+	}
+	// Replication left off entirely is not a deferral: the app deploy keeps its
+	// own scope and runs on every package if that is how it is configured.
+	if !appDeployStageRuns(stageScopeEach, false, stageStatusNone) {
+		t.Fatal("a per-file app deploy must run when replication is off")
+	}
+	// Its own scope still applies on top.
+	if appDeployStageRuns(stageScopeOnce, false, stageStatusNone) {
+		t.Fatal("an app deploy scoped to the upload must still wait for the last package")
+	}
+	if appDeployStageRuns(stageScopeOnce, false, stageStatusSkipped) {
+		t.Fatal("both conditions together must still hold the app deploy back")
+	}
+}
+
 func TestStageFailedTreatsSkippedAsNotAFailure(t *testing.T) {
 	for _, status := range []string{"NONE", "SKIPPED", "SUCCESS"} {
 		if stageFailed(status) {
