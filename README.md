@@ -119,7 +119,7 @@ systemd 없이 기동·종료·재기동을 하려면 패키지의 `releasedock.
 
 ```bash
 make package
-# release/releasedock-v0.5.2.tar.gz
+# release/releasedock-v0.5.3.tar.gz
 ```
 
 압축 파일과 같은 위치의 `.sha256`을 폐쇄망으로 함께 반입하고 검증한 뒤 설치합니다. PostgreSQL, Docker/Podman/containerd, Harbor와 배포 대상은 폐쇄망 내부에서 별도로 제공되어야 합니다.
