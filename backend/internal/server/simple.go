@@ -141,6 +141,38 @@ func (s *Server) listUserSimpleTargets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "commandMode": cfg.CommandMode})
 }
 
+// uploadBatch identifies the upload a run belongs to. Several packages dropped
+// at once become one run per file, and the stages that must happen only once
+// for the whole upload ride on the run the client marked as its last.
+type uploadBatch struct {
+	ID   string
+	Last bool
+}
+
+// readUploadBatch reads the optional batch fields from the multipart form. A
+// request that says nothing is one package on its own, so it is its own last
+// run and the once-per-upload stages fire for it as they always have.
+func readUploadBatch(r *http.Request) uploadBatch {
+	batch := uploadBatch{Last: true}
+	// The identifier is only ever echoed back and grouped on, but keeping it to
+	// an opaque token means nothing arbitrary is stored on the run. A rejected
+	// identifier costs the grouping, never the ordering: the marker that says
+	// which run carries the once-per-upload stages is read regardless.
+	id := strings.TrimSpace(r.FormValue("batchId"))
+	if len(id) <= 64 && strings.IndexFunc(id, func(char rune) bool {
+		return !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') &&
+			!(char >= '0' && char <= '9') && char != '-' && char != '_'
+	}) < 0 {
+		batch.ID = id
+	}
+	if raw := strings.TrimSpace(r.FormValue("batchLast")); raw != "" {
+		if last, err := strconv.ParseBool(raw); err == nil {
+			batch.Last = last
+		}
+	}
+	return batch
+}
+
 // createSimpleRun stores the uploaded package in the target's directory and
 // starts the configured command. Nothing else happens on this path: no image
 // load, tag, registry push, approval, or version check.
@@ -198,6 +230,8 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	batch := readUploadBatch(r)
+
 	p, _ := principalFrom(r)
 	if !s.acquireSimpleRun() {
 		writeError(w, http.StatusTooManyRequests, "simple_run_limit", "동시에 실행할 수 있는 작업 수를 초과했습니다")
@@ -224,10 +258,12 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 	args := expandArgs(command.Args, stored)
 	_, err = s.store.Pool.Exec(r.Context(), `INSERT INTO simple_runs
 		(id,target_id,actor_id,original_filename,stored_path,size_bytes,sha256,
-		 command_source,resolved_command_path,resolved_command_args,resolved_timeout_seconds,status)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'PENDING')`,
+		 command_source,resolved_command_path,resolved_command_args,resolved_timeout_seconds,
+		 batch_id,batch_last,status)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'PENDING')`,
 		runID, target.ID, p.UserID, filename, stored, size, checksum,
-		command.Source, command.Path, args, int(command.Timeout/time.Second))
+		command.Source, command.Path, args, int(command.Timeout/time.Second),
+		batch.ID, batch.Last)
 	if err != nil {
 		// The partial unique index rejects a second in-flight run per target.
 		writeError(w, http.StatusConflict, "simple_run_active", "이 대상에서 이미 실행 중인 작업이 있습니다")
@@ -243,13 +279,14 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 	started = true
 	go func() {
 		defer s.releaseSimpleRun()
-		s.executeSimpleRun(runID, command, args, stored, filename, checksum, target, p.UserID)
+		s.executeSimpleRun(runID, command, args, stored, filename, checksum, target, p.UserID, batch)
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id": runID, "targetId": target.ID, "targetName": target.Name,
 		"filename": filename, "storedPath": stored, "sizeBytes": size, "sha256": checksum,
 		"commandSource": command.Source, "status": "PENDING",
+		"batchId": batch.ID, "batchLast": batch.Last,
 	})
 }
 
@@ -311,7 +348,7 @@ func (s *Server) storeSimpleArtifact(dir, filename string, file io.Reader, maxBy
 // executeSimpleRun runs the command to completion. It deliberately does not
 // use the request context: the run must survive the HTTP response that started
 // it, and its own timeout is the only bound.
-func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []string, artifact, filename, checksum string, target simpleTarget, actorID string) {
+func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []string, artifact, filename, checksum string, target simpleTarget, actorID string, batch uploadBatch) {
 	ctx := context.Background()
 	if _, err := s.store.Pool.Exec(ctx, `UPDATE simple_runs SET status='RUNNING',started_at=now() WHERE id=$1 AND status='PENDING'`, runID); err != nil {
 		s.log.Error("could not start simple run", "run", runID, "error", err)
@@ -357,33 +394,59 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 	logs.system(fmt.Sprintf("exit=%d status=%s duration=%s", result.ExitCode, status, result.Duration.Round(time.Millisecond)))
 	logs.flush()
 
-	// Replication runs only after a clean command, and its result is part
-	// of the run outcome: mirroring that never happened must not be
-	// reported as a green deployment.
+	// The two post-deployment stages run only after a clean command, and their
+	// results are part of the run outcome: mirroring or an app deployment that
+	// never happened must not be reported as a green deployment.
 	replicationStatus := "NONE"
 	var replicationExecutionID int64
 	replicationError := ""
-	// Read at the end of the run so a rule enabled during a long deployment
-	// still applies, and a rule disabled meanwhile is honoured.
+	appDeployStatus := "NONE"
+	appDeployError := ""
+	// Read at the end of the run so a stage enabled during a long deployment
+	// still applies, and a stage disabled meanwhile is honoured.
 	cfg, cfgErr := loadSimpleSettings(ctx, s.store.Pool)
 	if cfgErr != nil {
-		s.log.Warn("could not load simple settings for replication", "run", runID, "error", cfgErr)
+		s.log.Warn("could not load simple settings for post-run stages", "run", runID, "error", cfgErr)
 	}
-	if cfgErr == nil && status == "SUCCESS" && cfg.ReplicationEnabled && cfg.ReplicationRegistry != "" && cfg.ReplicationPolicyID > 0 {
-		replicationStatus, replicationExecutionID, replicationError = s.runReplication(ctx, cfg, runID, logs)
-		logs.flush()
-		if replicationStatus != "SUCCESS" {
+	if cfgErr == nil && status == "SUCCESS" {
+		if cfg.ReplicationEnabled && cfg.ReplicationRegistry != "" && cfg.ReplicationPolicyID > 0 {
+			if !stageRuns(cfg.ReplicationScope, batch.Last) {
+				replicationStatus = "SKIPPED"
+				logs.system("[replication] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
+			} else {
+				replicationStatus, replicationExecutionID, replicationError = s.runReplication(ctx, cfg, runID, logs)
+			}
+			logs.flush()
+		}
+		if stageFailed(replicationStatus) {
 			status = "FAILED"
 			message = "배포 명령은 성공했으나 복제에 실패했습니다: " + replicationError
+		} else if cfg.AppDeployEnabled && cfg.AppDeployPath != "" {
+			// Deploying an image that was never mirrored is exactly what the
+			// ordering exists to prevent, so this is reached only on a
+			// replication that succeeded or was not asked for.
+			if !stageRuns(cfg.AppDeployScope, batch.Last) {
+				appDeployStatus = "SKIPPED"
+				logs.system("[app-deploy] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
+			} else {
+				appDeployStatus, appDeployError = s.runAppDeploy(ctx, cfg, runID, logs, target, artifact, filename, checksum, actorID)
+			}
+			logs.flush()
+			if stageFailed(appDeployStatus) {
+				status = "FAILED"
+				message = "배포 명령과 복제는 성공했으나 앱 배포에 실패했습니다: " + appDeployError
+			}
 		}
 	}
 
 	if _, err := s.store.Pool.Exec(ctx, `UPDATE simple_runs
 		SET status=$2,exit_code=$3,error=$4,replication_status=$5,
-		    replication_execution_id=NULLIF($6,0),replication_error=$7,finished_at=now()
+		    replication_execution_id=NULLIF($6,0),replication_error=$7,
+		    app_deploy_status=$8,app_deploy_error=$9,finished_at=now()
 		WHERE id=$1`,
 		runID, status, result.ExitCode, message,
-		replicationStatus, replicationExecutionID, replicationError); err != nil {
+		replicationStatus, replicationExecutionID, replicationError,
+		appDeployStatus, appDeployError); err != nil {
 		s.log.Error("could not record simple run outcome", "run", runID, "error", err)
 	}
 	s.store.Audit(ctx, actorID, "simple_run."+strings.ToLower(status), "simple_run", runID, strings.ToLower(status), "", "", nil)
@@ -589,6 +652,7 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 	}
 	var id, targetName, filename, storedPath, checksum, status, source, commandPath, errorText, actorName string
 	var replicationStatus, replicationError string
+	var appDeployStatus, appDeployError string
 	var replicationExecutionID int64
 	var args []string
 	var exitCode *int
@@ -600,6 +664,7 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 		run.stored_path,run.sha256,run.status,run.command_source,run.resolved_command_path,
 		run.resolved_command_args,run.resolved_timeout_seconds,run.exit_code,run.error,run.size_bytes,
 		run.replication_status,COALESCE(run.replication_execution_id,0),run.replication_error,
+		run.app_deploy_status,run.app_deploy_error,
 		run.created_at,run.started_at,run.finished_at,COALESCE(user_account.display_name,'')
 		FROM simple_runs run
 		JOIN simple_targets target ON target.id=run.target_id
@@ -608,6 +673,7 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 		Scan(&id, &targetName, &filename, &storedPath, &checksum, &status, &source, &commandPath,
 			&args, &timeout, &exitCode, &errorText, &size,
 			&replicationStatus, &replicationExecutionID, &replicationError,
+			&appDeployStatus, &appDeployError,
 			&created, &startedAt, &finishedAt, &actorName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
@@ -628,6 +694,7 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 		"actorName":         actorName,
 		"replicationStatus": replicationStatus, "replicationExecutionId": replicationExecutionID,
 		"replicationError": replicationError,
+		"appDeployStatus":  appDeployStatus, "appDeployError": appDeployError,
 	})
 }
 
@@ -909,4 +976,70 @@ func (s *Server) runReplication(ctx context.Context, cfg simpleSettings, runID s
 		logs.system("[replication] " + message)
 		return "FAILED", executionID, message
 	}
+}
+
+// stageFailed reads a post-deployment stage outcome. A stage that never ran,
+// deliberately or because it is off, is not a failure; anything else is.
+func stageFailed(status string) bool {
+	return status != "NONE" && status != "SKIPPED" && status != "SUCCESS"
+}
+
+// runAppDeploy runs the configured application deployment command. It is a
+// separate command from the per-package deployment command: that one unpacks
+// and loads whatever was just uploaded, while this one rolls the application
+// over once the images it needs are in place.
+func (s *Server) runAppDeploy(ctx context.Context, cfg simpleSettings, runID string, logs *simpleRunLogger,
+	target simpleTarget, artifact, filename, checksum, actorID string) (status string, failure string) {
+	if err := validateCommandFields(cfg.AppDeployPath, cfg.AppDeployArgs, cfg.AppDeployDir, cfg.AppDeployTimeout); err != nil {
+		message := "앱 배포 명령 설정이 올바르지 않습니다: " + err.Error()
+		logs.system("[app-deploy] " + message)
+		return "FAILED", message
+	}
+	dir := cfg.AppDeployDir
+	if dir == "" {
+		dir = target.UploadDir
+	}
+	args := expandArgs(cfg.AppDeployArgs, artifact)
+	logs.system(fmt.Sprintf("[app-deploy] $ %s %s", cfg.AppDeployPath, strings.Join(args, " ")))
+	started := time.Now()
+
+	result, runErr := localexec.Run(ctx, localexec.Spec{
+		Path:    cfg.AppDeployPath,
+		Args:    args,
+		Dir:     dir,
+		Timeout: time.Duration(cfg.AppDeployTimeout) * time.Second,
+		Env: map[string]string{
+			"PATH":               "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+			"HOME":               dir,
+			"LANG":               "C.UTF-8",
+			"LC_ALL":             "C.UTF-8",
+			"RELEASEDOCK_RUN_ID": runID,
+			"RELEASEDOCK_TARGET": target.Name,
+			"RELEASEDOCK_STAGE":  "app-deploy",
+			"ARTIFACT":           artifact,
+			"ARTIFACT_DIR":       target.UploadDir,
+			"ARTIFACT_NAME":      filename,
+			"ARTIFACT_SHA256":    checksum,
+			"ACTOR":              actorID,
+		},
+		Stdout: logs.writer("stdout"),
+		Stderr: logs.writer("stderr"),
+	})
+	logs.flush()
+
+	elapsed := result.Duration.Round(time.Millisecond)
+	if elapsed == 0 {
+		elapsed = time.Since(started).Round(time.Millisecond)
+	}
+	switch {
+	case result.TimedOut:
+		message := fmt.Sprintf("제한 시간 %d초를 초과하여 종료했습니다", cfg.AppDeployTimeout)
+		logs.system("[app-deploy] " + message)
+		return "TIMEOUT", message
+	case runErr != nil:
+		logs.system(fmt.Sprintf("[app-deploy] 실패 exit=%d: %s", result.ExitCode, runErr.Error()))
+		return "FAILED", runErr.Error()
+	}
+	logs.system(fmt.Sprintf("[app-deploy] 성공 (%s)", elapsed))
+	return "SUCCESS", ""
 }

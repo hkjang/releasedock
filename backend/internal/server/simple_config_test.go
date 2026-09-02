@@ -166,3 +166,49 @@ func TestEnsureUploadDirRejectsSymlink(t *testing.T) {
 		t.Fatalf("expected a symlink rejection, got %v", err)
 	}
 }
+
+func TestStageRunsHonoursTheConfiguredScope(t *testing.T) {
+	// EACH fires on every run of the upload; ONCE waits for the last one, by
+	// which point every package has been uploaded and deployed.
+	if !stageRuns(stageScopeEach, false) || !stageRuns(stageScopeEach, true) {
+		t.Fatal("EACH must run on every run of a batch")
+	}
+	if stageRuns(stageScopeOnce, false) {
+		t.Fatal("ONCE must not run on a run that is not the last of its batch")
+	}
+	if !stageRuns(stageScopeOnce, true) {
+		t.Fatal("ONCE must run on the last run of a batch")
+	}
+	// A single upload is its own last run, so an unset scope still fires.
+	if !stageRuns("", true) {
+		t.Fatal("an unknown scope must fall back to running")
+	}
+}
+
+func TestStageFailedTreatsSkippedAsNotAFailure(t *testing.T) {
+	for _, status := range []string{"NONE", "SKIPPED", "SUCCESS"} {
+		if stageFailed(status) {
+			t.Fatalf("%s must not count as a stage failure", status)
+		}
+	}
+	for _, status := range []string{"FAILED", "TIMEOUT", "RUNNING"} {
+		if !stageFailed(status) {
+			t.Fatalf("%s must count as a stage failure", status)
+		}
+	}
+}
+
+func TestNormalizeStageScopeRejectsAnythingElse(t *testing.T) {
+	for _, input := range []string{"each", " once ", "ONCE"} {
+		if _, err := normalizeStageScope(input); err != nil {
+			t.Fatalf("%q should normalize: %v", input, err)
+		}
+	}
+	scope, err := normalizeStageScope(" each ")
+	if err != nil || scope != stageScopeEach {
+		t.Fatalf("expected EACH, got %q (%v)", scope, err)
+	}
+	if _, err := normalizeStageScope("PER_FILE"); err == nil {
+		t.Fatal("an unknown scope must be rejected")
+	}
+}

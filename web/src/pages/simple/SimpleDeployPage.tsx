@@ -67,6 +67,16 @@ function acceptableName(name: string): boolean {
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Groups the runs one click produces. The server only ever echoes and groups
+// on it, so a random token is enough; crypto.randomUUID is not available on
+// pages served over plain HTTP in every browser, hence the fallback.
+function newBatchId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID().replace(/-/g, '');
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export function SimpleDeployPage() {
   const [targets, setTargets] = useState<SimpleTarget[]>([]);
   const [targetId, setTargetId] = useState('');
@@ -186,7 +196,13 @@ export function SimpleDeployPage() {
     setError('');
     setLogs([]);
 
-    for (const item of pending) {
+    // Every file of one click shares a batch id, and the last one is marked.
+    // The stages an administrator set to run once per upload — Harbor
+    // replication, the app deployment command — fire on that marked run, so
+    // they happen after every package has been uploaded and deployed.
+    const batchId = newBatchId();
+
+    for (const [index, item] of pending.entries()) {
       if (cancelledRef.current) {
         patchItem(item.key, { status: 'SKIPPED' });
         continue;
@@ -195,7 +211,10 @@ export function SimpleDeployPage() {
       setLogs((current) => [...current, { id: Date.now(), stream: 'system', message: `── ${item.file.name} ──` }]);
       let runId = '';
       try {
-        const created = await api.startSimpleRun(targetId, item.file);
+        const created = await api.startSimpleRun(targetId, item.file, {
+          id: batchId,
+          last: index === pending.length - 1,
+        });
         runId = created.id;
         patchItem(item.key, { status: 'RUNNING', runId });
         setActiveRunId(runId);

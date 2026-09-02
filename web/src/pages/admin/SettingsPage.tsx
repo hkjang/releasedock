@@ -54,7 +54,12 @@ const initialValues: Record<SettingSection, SettingValue> = {
   approval: { enabled: false, protectedEnvironments: '', allowSelfApproval: false, requireRejectComment: true },
   storage: { driver: 'local', localPath: '/var/lib/releasedock/artifacts' },
   runner: { pollIntervalMs: 2000, lockRetryMs: 5000, settingsRefreshMs: 30000, heartbeatIntervalMs: 5000, staleJobAfterMs: 60000, logChunkBytes: 16384 },
-  simple: { defaultUiMode: 'full', commandMode: 'PER_TARGET', sharedCommandPath: '', sharedCommandArgs: '', sharedWorkingDir: '', sharedTimeoutSeconds: 600, uploadRoot: '/var/lib/releasedock/simple' },
+  simple: {
+    defaultUiMode: 'full', commandMode: 'PER_TARGET', sharedCommandPath: '', sharedCommandArgs: '',
+    sharedWorkingDir: '', sharedTimeoutSeconds: 600, uploadRoot: '/var/lib/releasedock/simple',
+    replicationScope: 'ONCE', appDeployEnabled: false, appDeployScope: 'ONCE',
+    appDeployCommandPath: '', appDeployCommandArgs: '', appDeployWorkingDir: '', appDeployTimeoutSeconds: 600,
+  },
   network: { adminIpAllowlistEnabled: false, adminIpAllowlist: '', trustedProxyCidrs: '' },
 };
 
@@ -566,6 +571,113 @@ function ReplicationFields({ values, set, disabled }: FieldsProps) {
         helperText="이 시간 안에 복제가 끝나지 않으면 실행 기록을 시간 초과로 남깁니다. 기본 900초."
         fullWidth
       />
+
+      <StageScopeField
+        label="복제 실행 범위"
+        value={String(values.replicationScope ?? 'ONCE')}
+        onChange={(scope) => set('replicationScope', scope)}
+        disabled={disabled}
+        onceHelp="여러 파일을 한 번에 올리면 모든 파일의 업로드와 배포 명령이 끝난 뒤 마지막 파일에서 복제를 한 번만 실행합니다."
+        eachHelp="파일마다 배포 명령이 성공할 때마다 복제를 실행합니다. 파일 수만큼 복제가 반복됩니다."
+      />
+    </Stack>
+  );
+}
+
+// The two post-deployment stages share this control: either they run after
+// every uploaded package, or once for the whole upload.
+function StageScopeField({ label, value, onChange, disabled, onceHelp, eachHelp }: {
+  label: string;
+  value: string;
+  onChange: (scope: string) => void;
+  disabled: boolean;
+  onceHelp: string;
+  eachHelp: string;
+}) {
+  return (
+    <TextField
+      select
+      label={label}
+      disabled={disabled}
+      value={value === 'EACH' ? 'EACH' : 'ONCE'}
+      onChange={(e) => onChange(e.target.value)}
+      helperText={value === 'EACH' ? eachHelp : onceHelp}
+      fullWidth
+    >
+      <MenuItem value="ONCE">업로드당 한 번 (마지막 파일에서 실행)</MenuItem>
+      <MenuItem value="EACH">파일마다</MenuItem>
+    </TextField>
+  );
+}
+
+// The application deployment command is separate from the per-package
+// deployment command: that one handles the package that was just uploaded,
+// this one rolls the application over once the images are in place.
+function AppDeployFields({ values, set, disabled }: FieldsProps) {
+  const enabled = Boolean(values.appDeployEnabled);
+  return (
+    <Stack spacing={2.25}>
+      <FormControlLabel
+        control={
+          <Switch
+            disabled={disabled}
+            checked={enabled}
+            onChange={(e) => set('appDeployEnabled', e.target.checked)}
+          />
+        }
+        label="Harbor 복제 다음으로 앱 배포 명령 실행"
+      />
+      <Alert severity={enabled ? 'warning' : 'info'}>
+        {enabled
+          ? '배포 명령과 복제가 모두 성공하면 아래 명령을 실행합니다. 이 명령이 실패하면 실행 기록도 실패로 남습니다.'
+          : '켜면 Harbor 복제가 끝난 뒤 앱을 실제로 띄우는 명령을 이어서 실행합니다. 복제가 실패하면 실행하지 않습니다.'}
+      </Alert>
+
+      <TextField
+        label="앱 배포 명령 (절대 경로)"
+        disabled={disabled}
+        value={String(values.appDeployCommandPath ?? '')}
+        onChange={(e) => set('appDeployCommandPath', e.target.value)}
+        placeholder="/opt/releasedock/bin/app-deploy.sh"
+        helperText="셸을 거치지 않고 이 실행 파일을 그대로 실행합니다. 절대 경로여야 합니다."
+        fullWidth
+      />
+      <TextField
+        label="앱 배포 명령 인자"
+        disabled={disabled}
+        value={String(values.appDeployCommandArgs ?? '')}
+        onChange={(e) => set('appDeployCommandArgs', e.target.value)}
+        multiline
+        minRows={2}
+        helperText="한 줄에 인자 하나씩 입력합니다. {{artifact}} 는 마지막으로 올린 패키지의 절대 경로로 바뀝니다."
+        fullWidth
+      />
+      <TextField
+        label="앱 배포 작업 디렉터리"
+        disabled={disabled}
+        value={String(values.appDeployWorkingDir ?? '')}
+        onChange={(e) => set('appDeployWorkingDir', e.target.value)}
+        helperText="비워 두면 대상의 업로드 경로에서 실행합니다."
+        fullWidth
+      />
+      <TextField
+        label="앱 배포 제한 시간 (초)"
+        type="number"
+        disabled={disabled}
+        value={Number(values.appDeployTimeoutSeconds ?? 600)}
+        onChange={(e) => set('appDeployTimeoutSeconds', Number(e.target.value))}
+        inputProps={{ min: 1, max: 86400 }}
+        helperText="이 시간 안에 끝나지 않으면 실행 기록을 시간 초과로 남깁니다. 기본 600초."
+        fullWidth
+      />
+      <StageScopeField
+        label="앱 배포 실행 범위"
+        value={String(values.appDeployScope ?? 'ONCE')}
+        onChange={(scope) => set('appDeployScope', scope)}
+        disabled={disabled}
+        onceHelp="여러 파일을 올려도 마지막 파일에서 앱 배포를 한 번만 실행합니다."
+        eachHelp="파일마다 앱 배포 명령을 실행합니다."
+      />
     </Stack>
   );
 }
@@ -623,6 +735,8 @@ export function SettingsPage({ section }: { section: SettingSection }) {
             {section === 'simple' && <SimpleFields values={values} set={set} disabled={!canWrite} />}
             {section === 'simple' && <Divider sx={{ my: 3 }} />}
             {section === 'simple' && <ReplicationFields values={values} set={set} disabled={!canWrite} />}
+            {section === 'simple' && <Divider sx={{ my: 3 }} />}
+            {section === 'simple' && <AppDeployFields values={values} set={set} disabled={!canWrite} />}
             {section === 'network' && <NetworkFields values={values} set={set} disabled={!canWrite} />}
           </SettingCard>
         </Stack>

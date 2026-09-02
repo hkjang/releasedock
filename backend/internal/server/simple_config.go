@@ -22,6 +22,14 @@ const (
 	commandModeShared    = "SHARED"
 )
 
+// A post-deployment stage either runs after every uploaded package, or once
+// for the whole upload. "Once" means on the last run of the batch, by which
+// point every package has been uploaded and every command has finished.
+const (
+	stageScopeEach = "EACH"
+	stageScopeOnce = "ONCE"
+)
+
 type simpleSettings struct {
 	DefaultUIMode        string   `json:"defaultUiMode"`
 	CommandMode          string   `json:"commandMode"`
@@ -32,12 +40,22 @@ type simpleSettings struct {
 	UploadRoot           string   `json:"uploadRoot"`
 	// Replication is triggered only after the command succeeds, so a failed
 	// deployment never mirrors a half-applied state.
-	ReplicationEnabled  bool      `json:"replicationEnabled"`
-	ReplicationRegistry string    `json:"replicationRegistryId"`
-	ReplicationPolicyID int64     `json:"replicationPolicyId"`
-	ReplicationPolicy   string    `json:"replicationPolicyName"`
-	ReplicationTimeout  int       `json:"replicationTimeoutSeconds"`
-	UpdatedAt           time.Time `json:"updatedAt"`
+	ReplicationEnabled  bool   `json:"replicationEnabled"`
+	ReplicationRegistry string `json:"replicationRegistryId"`
+	ReplicationPolicyID int64  `json:"replicationPolicyId"`
+	ReplicationPolicy   string `json:"replicationPolicyName"`
+	ReplicationTimeout  int    `json:"replicationTimeoutSeconds"`
+	ReplicationScope    string `json:"replicationScope"`
+	// The application deployment command runs after replication, and only if
+	// replication did not fail: deploying an image that was never mirrored is
+	// exactly the state this stage exists to avoid.
+	AppDeployEnabled bool      `json:"appDeployEnabled"`
+	AppDeployScope   string    `json:"appDeployScope"`
+	AppDeployPath    string    `json:"appDeployCommandPath"`
+	AppDeployArgs    []string  `json:"appDeployCommandArgs"`
+	AppDeployDir     string    `json:"appDeployWorkingDir"`
+	AppDeployTimeout int       `json:"appDeployTimeoutSeconds"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 func loadSimpleSettings(ctx context.Context, q interface {
@@ -48,19 +66,33 @@ func loadSimpleSettings(ctx context.Context, q interface {
 	err := q.QueryRow(ctx, `SELECT default_ui_mode,command_mode,shared_command_path,shared_command_args,
 		shared_working_dir,shared_timeout_seconds,upload_root,replication_enabled,
 		replication_registry_id::text,COALESCE(replication_policy_id,0),replication_policy_name,
-		replication_timeout_seconds,updated_at
+		replication_timeout_seconds,replication_scope,app_deploy_enabled,app_deploy_scope,
+		app_deploy_command_path,app_deploy_command_args,app_deploy_working_dir,
+		app_deploy_timeout_seconds,updated_at
 		FROM simple_settings WHERE id='default'`).
 		Scan(&cfg.DefaultUIMode, &cfg.CommandMode, &cfg.SharedCommandPath, &cfg.SharedCommandArgs,
 			&cfg.SharedWorkingDir, &cfg.SharedTimeoutSeconds, &cfg.UploadRoot, &cfg.ReplicationEnabled,
 			&registryID, &cfg.ReplicationPolicyID, &cfg.ReplicationPolicy,
-			&cfg.ReplicationTimeout, &cfg.UpdatedAt)
+			&cfg.ReplicationTimeout, &cfg.ReplicationScope, &cfg.AppDeployEnabled, &cfg.AppDeployScope,
+			&cfg.AppDeployPath, &cfg.AppDeployArgs, &cfg.AppDeployDir,
+			&cfg.AppDeployTimeout, &cfg.UpdatedAt)
 	if registryID != nil {
 		cfg.ReplicationRegistry = *registryID
 	}
 	if cfg.SharedCommandArgs == nil {
 		cfg.SharedCommandArgs = []string{}
 	}
+	if cfg.AppDeployArgs == nil {
+		cfg.AppDeployArgs = []string{}
+	}
 	return cfg, err
+}
+
+// stageRuns decides whether a post-deployment stage fires on this run. A stage
+// scoped to the whole upload runs on the last run of the batch only, so the
+// packages that came before it have all been deployed by then.
+func stageRuns(scope string, batchLast bool) bool {
+	return scope != stageScopeOnce || batchLast
 }
 
 // resolvedCommand is the command a run will actually execute, frozen at the

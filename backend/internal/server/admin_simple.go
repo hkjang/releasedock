@@ -258,7 +258,24 @@ type simpleSettingsInput struct {
 	ReplicationPolicyID  *int64  `json:"replicationPolicyId"`
 	ReplicationPolicy    *string `json:"replicationPolicyName"`
 	ReplicationTimeout   *int    `json:"replicationTimeoutSeconds"`
+	ReplicationScope     *string `json:"replicationScope"`
+	AppDeployEnabled     *bool   `json:"appDeployEnabled"`
+	AppDeployScope       *string `json:"appDeployScope"`
+	AppDeployPath        *string `json:"appDeployCommandPath"`
+	AppDeployArgs        *string `json:"appDeployCommandArgs"`
+	AppDeployDir         *string `json:"appDeployWorkingDir"`
+	AppDeployTimeout     *int    `json:"appDeployTimeoutSeconds"`
 	UploadRoot           *string `json:"uploadRoot"`
+}
+
+// normalizeStageScope keeps the two post-deployment scopes to the values the
+// storage constraint allows, so a typo cannot reach the database.
+func normalizeStageScope(value string) (string, error) {
+	scope := strings.ToUpper(strings.TrimSpace(value))
+	if scope != stageScopeEach && scope != stageScopeOnce {
+		return "", errors.New("실행 범위는 EACH 또는 ONCE여야 합니다")
+	}
+	return scope, nil
 }
 
 func (s *Server) getSimpleSettings(w http.ResponseWriter, r *http.Request) {
@@ -277,6 +294,13 @@ func (s *Server) getSimpleSettings(w http.ResponseWriter, r *http.Request) {
 		"replicationPolicyId":       cfg.ReplicationPolicyID,
 		"replicationPolicyName":     cfg.ReplicationPolicy,
 		"replicationTimeoutSeconds": cfg.ReplicationTimeout,
+		"replicationScope":          cfg.ReplicationScope,
+		"appDeployEnabled":          cfg.AppDeployEnabled,
+		"appDeployScope":            cfg.AppDeployScope,
+		"appDeployCommandPath":      cfg.AppDeployPath,
+		"appDeployCommandArgs":      joinCommandArgs(cfg.AppDeployArgs),
+		"appDeployWorkingDir":       cfg.AppDeployDir,
+		"appDeployTimeoutSeconds":   cfg.AppDeployTimeout,
 	})
 }
 
@@ -346,6 +370,37 @@ func (s *Server) putSimpleSettings(w http.ResponseWriter, r *http.Request) {
 	if input.ReplicationTimeout != nil {
 		cfg.ReplicationTimeout = *input.ReplicationTimeout
 	}
+	if input.ReplicationScope != nil {
+		scope, err := normalizeStageScope(*input.ReplicationScope)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_simple_settings", err.Error())
+			return
+		}
+		cfg.ReplicationScope = scope
+	}
+	if input.AppDeployEnabled != nil {
+		cfg.AppDeployEnabled = *input.AppDeployEnabled
+	}
+	if input.AppDeployScope != nil {
+		scope, err := normalizeStageScope(*input.AppDeployScope)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_simple_settings", err.Error())
+			return
+		}
+		cfg.AppDeployScope = scope
+	}
+	if input.AppDeployPath != nil {
+		cfg.AppDeployPath = strings.TrimSpace(*input.AppDeployPath)
+	}
+	if input.AppDeployArgs != nil {
+		cfg.AppDeployArgs = splitCommandArgs(*input.AppDeployArgs)
+	}
+	if input.AppDeployDir != nil {
+		cfg.AppDeployDir = strings.TrimSpace(*input.AppDeployDir)
+	}
+	if input.AppDeployTimeout != nil {
+		cfg.AppDeployTimeout = *input.AppDeployTimeout
+	}
 	if cfg.ReplicationTimeout < 1 || cfg.ReplicationTimeout > 86400 {
 		writeError(w, http.StatusBadRequest, "invalid_simple_settings", "복제 제한 시간은 1초 이상 86400초 이하여야 합니다")
 		return
@@ -363,6 +418,19 @@ func (s *Server) putSimpleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The app deployment command is validated whenever it is present, not only
+	// while the stage is on, so a stored value can never become active while
+	// invalid. Enabling without one would fail on every deployment.
+	if cfg.AppDeployPath != "" {
+		if err := validateCommandFields(cfg.AppDeployPath, cfg.AppDeployArgs, cfg.AppDeployDir, cfg.AppDeployTimeout); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_app_deploy_command", err.Error())
+			return
+		}
+	} else if cfg.AppDeployEnabled {
+		writeError(w, http.StatusBadRequest, "invalid_simple_settings", "앱 배포를 사용하려면 실행할 명령을 함께 입력해야 합니다")
+		return
+	}
+
 	if input.CommandMode != nil {
 		mode := strings.ToUpper(strings.TrimSpace(*input.CommandMode))
 		if mode != commandModePerTarget && mode != commandModeShared {
@@ -389,11 +457,16 @@ func (s *Server) putSimpleSettings(w http.ResponseWriter, r *http.Request) {
 		shared_command_path=$3,shared_command_args=$4,shared_working_dir=$5,shared_timeout_seconds=$6,
 		upload_root=$7,replication_enabled=$8,replication_registry_id=NULLIF($9,'')::uuid,
 		replication_policy_id=NULLIF($10,0),replication_policy_name=$11,
-		replication_timeout_seconds=$12,updated_by=$13,updated_at=now() WHERE id='default'`,
+		replication_timeout_seconds=$12,replication_scope=$13,app_deploy_enabled=$14,
+		app_deploy_scope=$15,app_deploy_command_path=$16,app_deploy_command_args=$17,
+		app_deploy_working_dir=$18,app_deploy_timeout_seconds=$19,
+		updated_by=$20,updated_at=now() WHERE id='default'`,
 		cfg.DefaultUIMode, cfg.CommandMode, cfg.SharedCommandPath, cfg.SharedCommandArgs,
 		cfg.SharedWorkingDir, cfg.SharedTimeoutSeconds, cfg.UploadRoot,
 		cfg.ReplicationEnabled, cfg.ReplicationRegistry, cfg.ReplicationPolicyID,
-		cfg.ReplicationPolicy, cfg.ReplicationTimeout, p.UserID)
+		cfg.ReplicationPolicy, cfg.ReplicationTimeout, cfg.ReplicationScope,
+		cfg.AppDeployEnabled, cfg.AppDeployScope, cfg.AppDeployPath, cfg.AppDeployArgs,
+		cfg.AppDeployDir, cfg.AppDeployTimeout, p.UserID)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}

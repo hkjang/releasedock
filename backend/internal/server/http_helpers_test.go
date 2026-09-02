@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -26,5 +28,37 @@ func TestWriteErrorWritesOneJSONDocument(t *testing.T) {
 	errorBody, ok := body["error"].(map[string]any)
 	if !ok || errorBody["code"] != "invalid_request" || errorBody["message"] != "request is invalid" {
 		t.Fatalf("unexpected error body: %#v", body)
+	}
+}
+
+func TestReadUploadBatchDefaultsToASingleLastRun(t *testing.T) {
+	form := func(values map[string]string) *http.Request {
+		body := url.Values{}
+		for key, value := range values {
+			body.Set(key, value)
+		}
+		r := httptest.NewRequest(http.MethodPost, "/simple/runs", strings.NewReader(body.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		return r
+	}
+
+	// A request that says nothing about a batch is one package on its own, so
+	// the once-per-upload stages must still fire for it.
+	batch := readUploadBatch(form(nil))
+	if batch.ID != "" || !batch.Last {
+		t.Fatalf("expected an unbatched last run, got %+v", batch)
+	}
+
+	batch = readUploadBatch(form(map[string]string{"batchId": "abc123", "batchLast": "false"}))
+	if batch.ID != "abc123" || batch.Last {
+		t.Fatalf("expected a non-final run of batch abc123, got %+v", batch)
+	}
+
+	// An identifier that is not an opaque token is dropped rather than stored.
+	// Dropping it must not promote a middle run into the one that carries the
+	// once-per-upload stages.
+	batch = readUploadBatch(form(map[string]string{"batchId": "a/../b", "batchLast": "false"}))
+	if batch.ID != "" || batch.Last {
+		t.Fatalf("expected the identifier to be dropped but the marker kept, got %+v", batch)
 	}
 }

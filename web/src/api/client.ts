@@ -231,6 +231,10 @@ export interface SimpleLogLine {
   createdAt: string;
 }
 
+// A post-deployment stage either did not apply (NONE), was deliberately left
+// to the last package of the upload (SKIPPED), or ran and has an outcome.
+export type StageStatus = 'NONE' | 'SKIPPED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
+
 export interface SimpleRun {
   id: string;
   targetName: string;
@@ -246,9 +250,13 @@ export interface SimpleRun {
   sha256?: string;
   timeoutSeconds?: number;
   actorName?: string;
-  replicationStatus?: 'NONE' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
+  replicationStatus?: StageStatus;
   replicationExecutionId?: number;
   replicationError?: string;
+  appDeployStatus?: StageStatus;
+  appDeployError?: string;
+  batchId?: string;
+  batchLast?: boolean;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
@@ -342,6 +350,13 @@ function serializeSettings(section: SettingSection, value: SettingValue): Settin
       replicationPolicyId: Number(value.replicationPolicyId ?? 0),
       replicationPolicyName: String(value.replicationPolicyName ?? ''),
       replicationTimeoutSeconds: Number(value.replicationTimeoutSeconds ?? 900),
+      replicationScope: String(value.replicationScope ?? 'ONCE'),
+      appDeployEnabled: Boolean(value.appDeployEnabled),
+      appDeployScope: String(value.appDeployScope ?? 'ONCE'),
+      appDeployCommandPath: String(value.appDeployCommandPath ?? ''),
+      appDeployCommandArgs: String(value.appDeployCommandArgs ?? ''),
+      appDeployWorkingDir: String(value.appDeployWorkingDir ?? ''),
+      appDeployTimeoutSeconds: Number(value.appDeployTimeoutSeconds ?? 600),
     };
   }
   if (section === 'network') {
@@ -554,10 +569,16 @@ export const api = {
     ),
   simpleRunLogDownloadUrl: (id: string) => `${API_BASE}/simple/runs/${encodeURIComponent(id)}/logs?format=text`,
   // targetId may be empty: the server uses the only active target, which is
-  // what lets the deploy screen accept a bare drag-and-drop.
-  startSimpleRun: (targetId: string, artifact: File) => {
+  // what lets the deploy screen accept a bare drag-and-drop. The batch tells
+  // the server which upload the run belongs to, so the stages configured to
+  // run once per upload fire on the last package rather than on every one.
+  startSimpleRun: (targetId: string, artifact: File, batch?: { id: string; last: boolean }) => {
     const form = new FormData();
     form.set('artifact', artifact);
+    if (batch) {
+      form.set('batchId', batch.id);
+      form.set('batchLast', String(batch.last));
+    }
     const path = targetId ? `/simple/targets/${encodeURIComponent(targetId)}/runs` : '/simple/runs';
     return request<SimpleRun>(path, { method: 'POST', body: form });
   },

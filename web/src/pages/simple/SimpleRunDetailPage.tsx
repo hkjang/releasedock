@@ -33,6 +33,13 @@ function statusColor(status: string): 'default' | 'info' | 'success' | 'error' |
   return 'default';
 }
 
+// SKIPPED is not a problem: the stage was configured to run once per upload
+// and belongs to another file's run, so it is spelled out rather than shown
+// as a bare state name.
+function stageLabel(status: string): string {
+  return status === 'SKIPPED' ? '건너뜀 (마지막 파일에서 실행)' : status;
+}
+
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <Box sx={{ minWidth: 0 }}>
@@ -187,9 +194,22 @@ export function SimpleRunDetailPage() {
                   label="Harbor 복제"
                   value={
                     <Stack direction="row" spacing={1} alignItems="center">
-                      <Chip size="small" label={detail.replicationStatus} color={statusColor(detail.replicationStatus)} />
+                      <Chip size="small" label={stageLabel(detail.replicationStatus)} color={statusColor(detail.replicationStatus)} />
                       {Boolean(detail.replicationExecutionId) && (
                         <Typography variant="body2" color="text.secondary">execution {detail.replicationExecutionId}</Typography>
+                      )}
+                    </Stack>
+                  }
+                />
+              )}
+              {detail.appDeployStatus && detail.appDeployStatus !== 'NONE' && (
+                <Detail
+                  label="앱 배포"
+                  value={
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <Chip size="small" label={stageLabel(detail.appDeployStatus)} color={statusColor(detail.appDeployStatus)} />
+                      {Boolean(detail.appDeployError) && (
+                        <Typography variant="body2" color="text.secondary">{detail.appDeployError}</Typography>
                       )}
                     </Stack>
                   }
