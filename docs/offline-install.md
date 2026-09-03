@@ -27,10 +27,10 @@ Runtime binary는 종류별 `docker`/`podman`/`ctr` 이름과 `/usr/bin`, `/usr/
 ## 반입 검증
 
 ```bash
-sha256sum -c releasedock-v0.5.4.tar.gz.sha256
-tar -tzf releasedock-v0.5.4.tar.gz
-tar -xzf releasedock-v0.5.4.tar.gz
-cd releasedock-v0.5.4
+sha256sum -c releasedock-v0.5.5.tar.gz.sha256
+tar -tzf releasedock-v0.5.5.tar.gz
+tar -xzf releasedock-v0.5.5.tar.gz
+cd releasedock-v0.5.5
 sudo ./install.sh
 ```
 
@@ -80,7 +80,7 @@ level=INFO msg="serving web assets" source=embedded
 패키지에 포함된 `releasedock.sh` 로 systemd 없이 바로 띄울 수 있습니다. 평가 환경이나 심플 모드만 사용하는 설치에 적합합니다.
 
 ```bash
-cd releasedock-v0.5.4
+cd releasedock-v0.5.5
 cp releasedock.env.example releasedock.env   # 값을 채웁니다
 chmod 600 releasedock.env
 
