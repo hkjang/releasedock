@@ -255,24 +255,30 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	stored, size, checksum, err := s.storeSimpleArtifact(target.UploadDir, filename, file, target.MaxUploadBytes)
+	staged, err := s.stageSimpleArtifact(target.UploadDir, filename, file, target.MaxUploadBytes)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "upload_failed", err.Error())
 		return
 	}
+	published := false
+	defer func() {
+		if !published {
+			staged.discard()
+		}
+	}()
 
 	runID, err := secure.NewID()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "id_error", "could not allocate an identifier")
 		return
 	}
-	args := expandArgs(command.Args, stored)
+	args := expandArgs(command.Args, staged.path)
 	_, err = s.store.Pool.Exec(r.Context(), `INSERT INTO simple_runs
 		(id,target_id,actor_id,original_filename,stored_path,size_bytes,sha256,
 		 command_source,resolved_command_path,resolved_command_args,resolved_timeout_seconds,
 		 batch_id,batch_last,status)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'PENDING')`,
-		runID, target.ID, p.UserID, filename, stored, size, checksum,
+		runID, target.ID, p.UserID, filename, staged.path, staged.size, staged.checksum,
 		command.Source, command.Path, args, int(command.Timeout/time.Second),
 		batch.ID, batch.Last)
 	if err != nil {
@@ -281,8 +287,17 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The run now holds the target, so no other upload can be accepted for it
+	// and the package may finally take its own name.
+	if err := staged.commit(); err != nil {
+		s.failSimpleRun(r.Context(), runID, err.Error())
+		writeError(w, http.StatusInternalServerError, "upload_failed", err.Error())
+		return
+	}
+	published = true
+
 	details, _ := json.Marshal(map[string]any{
-		"targetId": target.ID, "filename": filename, "sha256": checksum,
+		"targetId": target.ID, "filename": filename, "sha256": staged.checksum,
 		"commandSource": command.Source, "commandPath": command.Path,
 	})
 	s.store.Audit(r.Context(), p.UserID, "simple_run.create", "simple_run", runID, "success", remoteIP(r), r.UserAgent(), details)
@@ -290,70 +305,114 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 	started = true
 	go func() {
 		defer s.releaseSimpleRun()
-		s.executeSimpleRun(runID, command, args, stored, filename, checksum, target, p.UserID, batch)
+		s.executeSimpleRun(runID, command, args, staged.path, filename, staged.checksum, target, p.UserID, batch)
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"id": runID, "targetId": target.ID, "targetName": target.Name,
-		"filename": filename, "storedPath": stored, "sizeBytes": size, "sha256": checksum,
+		"filename": filename, "storedPath": staged.path, "sizeBytes": staged.size, "sha256": staged.checksum,
 		"commandSource": command.Source, "status": "PENDING",
 		"batchId": batch.ID, "batchLast": batch.Last,
 	})
 }
 
-// storeSimpleArtifact writes the upload into the target directory under its
-// own name, staging through a temporary file so a reader never sees a partial
-// package. Re-uploading the same filename is the normal way to redeploy, so
-// the rename intentionally replaces any existing file atomically.
-func (s *Server) storeSimpleArtifact(dir, filename string, file io.Reader, maxBytes int64) (string, int64, string, error) {
+// failSimpleRun closes a run that was accepted but could never start. The row
+// already holds the target through the one-in-flight index, so leaving it
+// PENDING would block every later upload to that target until the process
+// restarts.
+func (s *Server) failSimpleRun(ctx context.Context, runID, reason string) {
+	if _, err := s.store.Pool.Exec(ctx,
+		`UPDATE simple_runs SET status='FAILED',error=$2,finished_at=now() WHERE id=$1 AND status='PENDING'`,
+		runID, reason); err != nil {
+		s.log.Error("could not close an unstarted simple run", "run", runID, "error", err)
+	}
+}
+
+// stagedArtifact is an upload that is written and hashed but not yet visible
+// under its own name. Re-uploading the same filename is the normal way to
+// redeploy, so committing replaces whatever sits at that path - which is
+// exactly why publishing has to wait: the file being replaced may be the
+// package a run that is still executing was handed, and an upload the server
+// goes on to reject must never swap it out underneath that command.
+type stagedArtifact struct {
+	server   *Server
+	path     string
+	partial  string
+	size     int64
+	checksum string
+}
+
+// stageSimpleArtifact writes the upload into the target directory under a
+// unique temporary name. Nothing at the package's own path is touched until
+// commit, so a caller that fails after this point can discard the upload
+// without disturbing the directory.
+func (s *Server) stageSimpleArtifact(dir, filename string, file io.Reader, maxBytes int64) (*stagedArtifact, error) {
 	if err := ensureUploadDir(dir); err != nil {
-		return "", 0, "", err
+		return nil, err
 	}
 	root, err := filepath.EvalSymlinks(dir)
 	if err != nil {
-		return "", 0, "", errors.New("업로드 경로를 확인할 수 없습니다")
+		return nil, errors.New("업로드 경로를 확인할 수 없습니다")
 	}
 	target := filepath.Join(root, filename)
 	if filepath.Dir(target) != filepath.Clean(root) {
-		return "", 0, "", errors.New("업로드 경로를 벗어나는 파일 이름입니다")
+		return nil, errors.New("업로드 경로를 벗어나는 파일 이름입니다")
 	}
 	token, err := secure.RandomToken(16)
 	if err != nil {
-		return "", 0, "", errors.New("임시 파일 이름을 만들 수 없습니다")
+		return nil, errors.New("임시 파일 이름을 만들 수 없습니다")
 	}
-	partial := target + ".partial-" + token
-	committed := false
+	staged := &stagedArtifact{server: s, path: target, partial: target + ".partial-" + token}
+	kept := false
 	defer func() {
-		if committed {
-			return
-		}
-		if err := os.Remove(partial); err != nil && !errors.Is(err, os.ErrNotExist) {
-			s.log.Warn("could not remove partial simple upload", "path", partial, "error", err)
+		if !kept {
+			staged.discard()
 		}
 	}()
 
-	output, err := os.OpenFile(partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
+	output, err := os.OpenFile(staged.partial, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o640)
 	if err != nil {
-		return "", 0, "", errors.New("업로드 파일을 만들 수 없습니다")
+		return nil, errors.New("업로드 파일을 만들 수 없습니다")
 	}
 	hash := sha256.New()
 	size, copyErr := io.Copy(io.MultiWriter(output, hash), io.LimitReader(file, maxBytes+1))
 	syncErr := output.Sync()
 	closeErr := output.Close()
 	if copyErr != nil || syncErr != nil || closeErr != nil {
-		return "", 0, "", errors.New("업로드 파일을 저장할 수 없습니다")
+		return nil, errors.New("업로드 파일을 저장할 수 없습니다")
 	}
 	if size > maxBytes {
-		return "", 0, "", fmt.Errorf("패키지가 허용 크기(%d bytes)를 초과했습니다", maxBytes)
+		return nil, fmt.Errorf("패키지가 허용 크기(%d bytes)를 초과했습니다", maxBytes)
 	}
-	if err := os.Rename(partial, target); err != nil {
-		return "", 0, "", errors.New("업로드 파일을 확정할 수 없습니다")
+	staged.size = size
+	staged.checksum = hex.EncodeToString(hash.Sum(nil))
+	kept = true
+	return staged, nil
+}
+
+// commit gives the package its own name atomically, so a reader never sees a
+// partial file and never sees the previous package half replaced.
+func (a *stagedArtifact) commit() error {
+	if err := os.Rename(a.partial, a.path); err != nil {
+		return errors.New("업로드 파일을 확정할 수 없습니다")
 	}
-	committed = true
-	if err := syncDirectory(root); err != nil {
-		return "", 0, "", errors.New("업로드 경로를 동기화할 수 없습니다")
+	a.partial = ""
+	if err := syncDirectory(filepath.Dir(a.path)); err != nil {
+		return errors.New("업로드 경로를 동기화할 수 없습니다")
 	}
-	return target, size, hex.EncodeToString(hash.Sum(nil)), nil
+	return nil
+}
+
+// discard removes the staged file. Its name is unique to this upload, so this
+// can never delete a package another run is using.
+func (a *stagedArtifact) discard() {
+	if a == nil || a.partial == "" {
+		return
+	}
+	if err := os.Remove(a.partial); err != nil && !errors.Is(err, os.ErrNotExist) {
+		a.server.log.Warn("could not remove partial simple upload", "path", a.partial, "error", err)
+	}
+	a.partial = ""
 }
 
 // executeSimpleRun runs the command to completion. It deliberately does not
