@@ -25,6 +25,17 @@ import (
 // past the cap; only its output stops being stored.
 const maxSimpleRunLogBytes = 8 << 20
 
+// maxSimpleRunSystemLogBytes is a separate reserve for the server's own
+// progress lines. They are few and short, and they are the only record in the
+// log of what happened after the command ended - the "exit=" line and the
+// replication, app deployment and post-deploy notices - so a chatty command
+// that fills the shared cap must not silence them too.
+const maxSimpleRunSystemLogBytes = 64 << 10
+
+// streamSystem marks a log row written by the server rather than by the
+// command.
+const streamSystem = "system"
+
 // maxSimpleConcurrentRuns bounds how many commands the API process runs at
 // once, independent of the one-run-per-target database constraint.
 const maxSimpleConcurrentRuns = 4
@@ -355,7 +366,7 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 		return
 	}
 
-	logs := &simpleRunLogger{server: s, ctx: ctx, runID: runID, remaining: maxSimpleRunLogBytes}
+	logs := &simpleRunLogger{server: s, ctx: ctx, runID: runID, budget: newLogBudget()}
 	logs.system(fmt.Sprintf("$ %s %s", command.Path, strings.Join(args, " ")))
 
 	result, runErr := localexec.Run(ctx, localexec.Spec{
@@ -460,15 +471,49 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 	s.store.Audit(ctx, actorID, "simple_run."+strings.ToLower(status), "simple_run", runID, strings.ToLower(status), "", "", nil)
 }
 
+// logBudget splits the storage a run may use. stdout and stderr share the
+// command budget so a run cannot store more than the documented cap, while the
+// server's own progress lines draw on a reserve of their own: they are what
+// tells the reader how the run ended, and losing them to a command that talked
+// too much would leave a truncated log with no outcome in it.
+type logBudget struct {
+	command int
+	system  int
+}
+
+func newLogBudget() logBudget {
+	return logBudget{command: maxSimpleRunLogBytes, system: maxSimpleRunSystemLogBytes}
+}
+
+// take charges size against the stream's budget and reports how much of it may
+// be stored. exhausted is true only on the payload that uses up the last of the
+// command budget, which is the one moment the reader is told that later command
+// output is dropped.
+func (b *logBudget) take(stream string, size int) (allowed int, exhausted bool) {
+	remaining := &b.command
+	if stream == streamSystem {
+		remaining = &b.system
+	}
+	if size <= 0 || *remaining <= 0 {
+		return 0, false
+	}
+	allowed = size
+	if allowed > *remaining {
+		allowed = *remaining
+	}
+	*remaining -= allowed
+	return allowed, stream != streamSystem && *remaining == 0
+}
+
 // simpleRunLogger appends command output line by line, sharing one byte budget
 // and one lock across stdout and stderr so interleaved output keeps its order.
 type simpleRunLogger struct {
-	server    *Server
-	ctx       context.Context
-	runID     string
-	mu        sync.Mutex
-	remaining int
-	pending   map[string][]byte
+	server  *Server
+	ctx     context.Context
+	runID   string
+	mu      sync.Mutex
+	budget  logBudget
+	pending map[string][]byte
 }
 
 func (l *simpleRunLogger) writer(stream string) io.Writer {
@@ -476,25 +521,20 @@ func (l *simpleRunLogger) writer(stream string) io.Writer {
 }
 
 func (l *simpleRunLogger) append(stream string, payload []byte) {
-	if len(payload) == 0 {
+	allowed, exhausted := l.budget.take(stream, len(payload))
+	if allowed <= 0 {
 		return
 	}
-	if l.remaining <= 0 {
-		return
-	}
-	if len(payload) > l.remaining {
-		payload = payload[:l.remaining]
-	}
-	l.remaining -= len(payload)
+	payload = payload[:allowed]
 	if _, err := l.server.store.Pool.Exec(l.ctx,
 		`INSERT INTO simple_run_logs(run_id,stream,payload) VALUES($1,$2,$3)`, l.runID, stream, payload); err != nil {
 		l.server.log.Warn("could not append simple run log", "run", l.runID, "error", err)
 		return
 	}
-	if l.remaining == 0 {
+	if exhausted {
 		_, _ = l.server.store.Pool.Exec(l.ctx,
 			`INSERT INTO simple_run_logs(run_id,stream,payload) VALUES($1,'system',$2)`,
-			l.runID, []byte("로그 저장 한도에 도달하여 이후 출력은 기록하지 않습니다"))
+			l.runID, []byte("로그 저장 한도에 도달하여 이후 명령 출력은 기록하지 않습니다"))
 	}
 	_, _ = l.server.store.Pool.Exec(l.ctx, `UPDATE simple_runs SET log_bytes=log_bytes+$2 WHERE id=$1`, l.runID, len(payload))
 }
@@ -502,7 +542,7 @@ func (l *simpleRunLogger) append(stream string, payload []byte) {
 func (l *simpleRunLogger) system(message string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.append("system", []byte(message))
+	l.append(streamSystem, []byte(message))
 }
 
 // write buffers until a newline so a stored row is a whole line, and forces a
