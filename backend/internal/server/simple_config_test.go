@@ -211,6 +211,50 @@ func TestAppDeployWaitsForADeferredReplication(t *testing.T) {
 	}
 }
 
+// A stage deferred to the last package mirrors and rolls over the upload as a
+// whole, so a package of that upload that never deployed leaves the registry
+// missing its images. Firing the stage there would report a partial upload as
+// deployed, which is the same hazard the stage ordering guards against.
+func TestStageHeldWhenAnotherPackageOfTheUploadDidNotDeploy(t *testing.T) {
+	if !stageHeldForIncompleteUpload(stageScopeOnce, true) {
+		t.Fatal("a once-per-upload stage must not run for an upload that is missing a package")
+	}
+	if stageHeldForIncompleteUpload(stageScopeOnce, false) {
+		t.Fatal("an upload whose packages all deployed must run its deferred stage")
+	}
+	// A per-package stage already ran with the package it belongs to, and a
+	// later failure does not retract the packages that did deploy.
+	if stageHeldForIncompleteUpload(stageScopeEach, true) {
+		t.Fatal("a per-package stage must keep its own scope")
+	}
+	if stageHeldForIncompleteUpload("", true) {
+		t.Fatal("only a deferred stage is held back")
+	}
+}
+
+// Holding the stages is the safe half of the fix; saying so is the other half.
+// Nothing was mirrored and the application was never rolled over, so the run
+// that carried them cannot be green.
+func TestOutcomeWithHeldStagesFailsAnOtherwiseGreenRun(t *testing.T) {
+	status, message := outcomeWithHeldStages("SUCCESS", "", true)
+	if status != "FAILED" {
+		t.Fatalf("status = %s, want FAILED", status)
+	}
+	if !strings.Contains(message, "다른 패키지") {
+		t.Fatalf("the message must name the cause, got %q", message)
+	}
+	// A run that already failed keeps its own cause, which explains more.
+	status, message = outcomeWithHeldStages("FAILED", "복제에 실패했습니다", true)
+	if status != "FAILED" || !strings.Contains(message, "복제에 실패") {
+		t.Fatalf("a failed run must keep its own outcome, got %s %q", status, message)
+	}
+	// Nothing held back leaves the outcome to the stages themselves.
+	status, message = outcomeWithHeldStages("SUCCESS", "", false)
+	if status != "SUCCESS" || message != "" {
+		t.Fatalf("a complete upload must not change the outcome, got %s %q", status, message)
+	}
+}
+
 // The settings say whether replication and the application deployment were
 // expected at all, so a run that could not read them cannot claim the stages
 // were not needed: reporting SUCCESS there would show an unmirrored image as a

@@ -472,6 +472,8 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 	replicationError := ""
 	appDeployStatus := stageStatusNone
 	appDeployError := ""
+	replicationHeld := false
+	appDeployHeld := false
 	// Read at the end of the run so a stage enabled during a long deployment
 	// still applies, and a stage disabled meanwhile is honoured.
 	cfg, cfgErr := loadSimpleSettings(ctx, s.store.Pool)
@@ -481,11 +483,20 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 		status, message = outcomeWithoutStageSettings(status, message, cfgErr)
 	}
 	if cfgErr == nil && status == "SUCCESS" {
+		// The stages every package of an upload pushed onto this one act on the
+		// upload as a whole, so they need every one of those packages to have
+		// deployed. Asked once, and only where a deferred stage can fire at all.
+		uploadIncomplete := batch.ID != "" && batch.Last && s.uploadHasFailedPackages(ctx, batch.ID, runID)
 		if cfg.ReplicationEnabled && cfg.ReplicationRegistry != "" && cfg.ReplicationPolicyID > 0 {
-			if !stageRuns(cfg.ReplicationScope, batch.Last) {
+			switch {
+			case !stageRuns(cfg.ReplicationScope, batch.Last):
 				replicationStatus = stageStatusSkipped
 				logs.system("[replication] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
-			} else {
+			case stageHeldForIncompleteUpload(cfg.ReplicationScope, uploadIncomplete):
+				replicationStatus = stageStatusSkipped
+				replicationHeld = true
+				logs.system("[replication] 같은 업로드의 다른 패키지가 배포되지 않아 복제를 실행하지 않았습니다")
+			default:
 				replicationStatus, replicationExecutionID, replicationError = s.runReplication(ctx, cfg, runID, logs)
 			}
 			logs.flush()
@@ -499,14 +510,22 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 			// replication that succeeded or was not asked for. A replication
 			// merely deferred to the last package has not mirrored anything
 			// yet, so the application deployment waits for it there too.
-			if !appDeployStageRuns(cfg.AppDeployScope, batch.Last, replicationStatus) {
+			switch {
+			case stageHeldForIncompleteUpload(cfg.AppDeployScope, uploadIncomplete):
 				appDeployStatus = stageStatusSkipped
-				if replicationStatus == stageStatusSkipped {
+				appDeployHeld = true
+				logs.system("[app-deploy] 같은 업로드의 다른 패키지가 배포되지 않아 앱 배포를 실행하지 않았습니다")
+			case !appDeployStageRuns(cfg.AppDeployScope, batch.Last, replicationStatus):
+				appDeployStatus = stageStatusSkipped
+				switch {
+				case replicationHeld:
+					logs.system("[app-deploy] 복제를 실행하지 않았으므로 앱 배포도 실행하지 않았습니다")
+				case replicationStatus == stageStatusSkipped:
 					logs.system("[app-deploy] 복제를 마지막 파일에서 실행하므로 앱 배포도 마지막 파일에서 실행합니다")
-				} else {
+				default:
 					logs.system("[app-deploy] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
 				}
-			} else {
+			default:
 				appDeployStatus, appDeployError = s.runAppDeploy(ctx, cfg, runID, logs, target, artifact, filename, checksum, actorID)
 			}
 			logs.flush()
@@ -516,6 +535,7 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 			}
 		}
 	}
+	status, message = outcomeWithHeldStages(status, message, replicationHeld || appDeployHeld)
 
 	if _, err := s.store.Pool.Exec(ctx, `UPDATE simple_runs
 		SET status=$2,exit_code=$3,error=$4,replication_status=$5,
@@ -528,6 +548,24 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 		s.log.Error("could not record simple run outcome", "run", runID, "error", err)
 	}
 	s.store.Audit(ctx, actorID, "simple_run."+strings.ToLower(status), "simple_run", runID, strings.ToLower(status), "", "", nil)
+}
+
+// uploadHasFailedPackages reports whether another package of the same upload
+// did not deploy. The runs of one upload are strictly sequential, so by the time
+// the package carrying the deferred stages executes, every other package of the
+// batch has finished; anything left that is not SUCCESS is a package whose
+// images never made it. A read failure answers yes, because the stages act on
+// the whole upload and cannot be justified by an answer the server does not
+// have.
+func (s *Server) uploadHasFailedPackages(ctx context.Context, batchID, runID string) bool {
+	var others int
+	if err := s.store.Pool.QueryRow(ctx,
+		`SELECT count(*) FROM simple_runs WHERE batch_id=$1 AND id<>$2 AND status<>'SUCCESS'`,
+		batchID, runID).Scan(&others); err != nil {
+		s.log.Warn("could not check an upload for packages that did not deploy", "run", runID, "error", err)
+		return true
+	}
+	return others > 0
 }
 
 // logBudget splits the storage a run may use. stdout and stderr share the
