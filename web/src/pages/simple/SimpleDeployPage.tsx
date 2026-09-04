@@ -27,7 +27,7 @@ interface LogLine {
   message: string;
 }
 
-type ItemStatus = 'QUEUED' | 'UPLOADING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'SKIPPED';
+type ItemStatus = 'QUEUED' | 'UPLOADING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'SKIPPED' | 'UNKNOWN';
 
 interface QueueItem {
   key: string;
@@ -43,7 +43,7 @@ const TERMINAL = ['SUCCESS', 'FAILED', 'TIMEOUT'];
 function statusColor(status: string): 'default' | 'info' | 'success' | 'error' | 'warning' {
   if (status === 'SUCCESS') return 'success';
   if (status === 'FAILED') return 'error';
-  if (status === 'TIMEOUT') return 'warning';
+  if (status === 'TIMEOUT' || status === 'UNKNOWN') return 'warning';
   if (status === 'RUNNING' || status === 'UPLOADING') return 'info';
   return 'default';
 }
@@ -57,6 +57,7 @@ function statusLabel(status: ItemStatus): string {
     case 'FAILED': return '실패';
     case 'TIMEOUT': return '시간 초과';
     case 'SKIPPED': return '건너뜀';
+    case 'UNKNOWN': return '확인 불가';
   }
 }
 
@@ -92,6 +93,36 @@ export function stagesReached(run?: Pick<SimpleRun, 'replicationStatus' | 'appDe
     (status) => status !== undefined && status !== 'NONE' && status !== 'SKIPPED',
   );
 }
+
+const POLL_INTERVAL_MS = 1500;
+// How many reads in a row may fail before the queue stops asking. The run
+// itself always reaches a terminal state on its own - the server times it out
+// and marks orphaned runs FAILED on boot - so the only thing that can go on
+// forever is the reading, and the queue is strictly sequential: it reads the
+// stop button only between packages, so one unreadable run locks the page
+// until the operator reloads it and the packages behind it never upload.
+export const POLL_FAILURE_BUDGET = 40;
+
+// pollAbandonReason returns why the queue should stop asking about a run, or
+// null while it should keep asking. A read rejected because the session ended
+// or because the record is gone will never start succeeding, so it stops at
+// once; anything else - a proxy hiccup, a server being restarted - is retried
+// until the budget above is spent.
+export function pollAbandonReason(status: number | undefined, consecutiveFailures: number): string | null {
+  if (status === 401 || status === 403) return '로그인이 만료되어 배포 진행 상태를 더 이상 확인할 수 없습니다.';
+  if (status === 404) return '실행 기록을 찾을 수 없어 배포 진행 상태를 확인할 수 없습니다.';
+  if (consecutiveFailures >= POLL_FAILURE_BUDGET) {
+    return `서버에 연결하지 못해 약 ${Math.round((POLL_FAILURE_BUDGET * POLL_INTERVAL_MS) / 1000)}초 동안 배포 진행 상태를 확인하지 못했습니다.`;
+  }
+  return null;
+}
+
+// Raised when the queue gave up reading a run. The package is neither a
+// success nor a failure - the deployment may well still be running - so it
+// must not be reported as either.
+class RunStateUnknown extends Error {}
+
+const UNKNOWN_ADVICE = '배포는 계속 진행 중일 수 있으니 실행 목록에서 결과를 확인하십시오.';
 
 // Groups the runs one click produces. The server only ever echoes and groups
 // on it, so a random token is enough; crypto.randomUUID is not available on
@@ -200,13 +231,19 @@ export function SimpleDeployPage() {
   // Runs are strictly sequential: the database permits only one in-flight run
   // per target, so a parallel upload of several files would be rejected.
   const waitForTerminal = async (runId: string): Promise<SimpleRun> => {
+    let failures = 0;
     for (;;) {
-      await sleep(1500);
+      await sleep(POLL_INTERVAL_MS);
       try {
         const run = await api.simpleRun(runId);
+        failures = 0;
         if (TERMINAL.includes(run.status)) return run;
-      } catch {
-        // A transient read failure should not abandon a run that is still going.
+      } catch (cause) {
+        // A transient read failure should not abandon a run that is still
+        // going, but a read that cannot recover must not loop for ever.
+        failures += 1;
+        const reason = pollAbandonReason(cause instanceof ApiError ? cause.status : undefined, failures);
+        if (reason) throw new RunStateUnknown(reason);
       }
     }
   };
@@ -233,6 +270,10 @@ export function SimpleDeployPage() {
     // became of that package. Compared once the queue is done.
     let deferredStages = false;
     let markedRun: SimpleRun | undefined;
+    // Set when the queue stopped reading a run. What the upload ended up doing
+    // is then unknown, so the stranded warning below - which claims the stages
+    // did not run - must not be drawn on top of it.
+    let unknown = false;
 
     for (const [index, item] of pending.entries()) {
       const marked = index === pending.length - 1;
@@ -257,7 +298,19 @@ export function SimpleDeployPage() {
         setLogs((current) => [...current, { id: Date.now(), stream: 'stderr', message }]);
         continue;
       }
-      const outcome = await waitForTerminal(runId);
+      let outcome: SimpleRun;
+      try {
+        outcome = await waitForTerminal(runId);
+      } catch (cause) {
+        const message = `${cause instanceof RunStateUnknown ? cause.message : '배포 진행 상태를 확인하지 못했습니다.'} ${UNKNOWN_ADVICE}`;
+        patchItem(item.key, { status: 'UNKNOWN', error: message });
+        setLogs((current) => [...current, { id: Date.now(), stream: 'stderr', message }]);
+        setError(message);
+        unknown = true;
+        // The target is still held by this run, so the packages left in the
+        // queue would only be rejected. They stay queued for a later attempt.
+        break;
+      }
       patchItem(item.key, {
         status: outcome.status as ItemStatus,
         exitCode: outcome.exitCode,
@@ -268,7 +321,7 @@ export function SimpleDeployPage() {
     }
     setActiveRunId('');
     setRunning(false);
-    setStranded(deferredStages && !stagesReached(markedRun));
+    setStranded(!unknown && deferredStages && !stagesReached(markedRun));
   };
 
   const queuedCount = queue.filter((item) => item.status === 'QUEUED').length;
