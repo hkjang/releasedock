@@ -116,6 +116,30 @@ func appDeployStageRuns(scope string, batchLast bool, replicationStatus string) 
 	return stageRuns(scope, batchLast)
 }
 
+// stageHeldForIncompleteUpload adds the last condition to a stage that was
+// deferred to the final package of an upload: every other package of that
+// upload must have deployed. A deferred stage acts on the upload as a whole -
+// it mirrors whatever the registry holds by then and rolls the application over
+// once - so firing it after a package failed would publish an upload that is
+// only partly in place, missing the images the failed package carried. That is
+// the state the stage ordering exists to prevent, reached from the other side.
+// A per-package stage is unaffected: it already ran with the package it belongs
+// to, and the packages that did deploy are not retracted by a later failure.
+func stageHeldForIncompleteUpload(scope string, uploadIncomplete bool) bool {
+	return scope == stageScopeOnce && uploadIncomplete
+}
+
+// outcomeWithHeldStages decides the outcome of a run that deployed its own
+// package but held the stages the rest of the upload was counting on. Nothing
+// was mirrored and the application was never rolled over, so a green run would
+// report the upload as deployed when it is not.
+func outcomeWithHeldStages(status, message string, held bool) (string, string) {
+	if !held || status != "SUCCESS" {
+		return status, message
+	}
+	return "FAILED", "배포 명령은 성공했으나 같은 업로드의 다른 패키지가 배포되지 않아 업로드당 한 번 실행하는 단계(복제·앱 배포)를 실행하지 않았습니다"
+}
+
 // outcomeWithoutStageSettings decides the outcome of a run whose settings
 // could not be read once the deployment command finished. Whether replication
 // and the application deployment were expected is exactly what those settings
