@@ -1,4 +1,12 @@
-import { POLL_FAILURE_BUDGET, pollAbandonReason, stagesDeferred, stagesReached } from './SimpleDeployPage';
+import {
+  POLL_FAILURE_BUDGET,
+  pollAbandonReason,
+  requeue,
+  retryablePackage,
+  stagesDeferred,
+  stagesReached,
+  type QueueItem,
+} from './SimpleDeployPage';
 
 describe('once-per-upload stages that lost the package carrying them', () => {
   it('treats only SKIPPED as a stage pushed onto the last package', () => {
@@ -41,6 +49,55 @@ describe('once-per-upload stages that lost the package carrying them', () => {
       { replicationStatus: 'SUCCESS', appDeployStatus: 'SUCCESS' },
       { replicationStatus: 'NONE', appDeployStatus: 'NONE' },
     )).toBe(false);
+  });
+});
+
+describe('sending the packages that did not deploy again', () => {
+  const item = (name: string, status: QueueItem['status'], extra: Partial<QueueItem> = {}): QueueItem => ({
+    key: `${name}:1`,
+    file: new File(['x'], name),
+    status,
+    ...extra,
+  });
+
+  it('offers a retry for every package that did not deploy', () => {
+    expect(retryablePackage('SKIPPED')).toBe(true);
+    expect(retryablePackage('FAILED')).toBe(true);
+    expect(retryablePackage('TIMEOUT')).toBe(true);
+    // Its run may still be going, but only the operator can tell, and the
+    // server rejects the upload rather than deploying the package twice.
+    expect(retryablePackage('UNKNOWN')).toBe(true);
+    // Nothing to retry: already deployed, already waiting, or under way.
+    expect(retryablePackage('SUCCESS')).toBe(false);
+    expect(retryablePackage('QUEUED')).toBe(false);
+    expect(retryablePackage('UPLOADING')).toBe(false);
+    expect(retryablePackage('RUNNING')).toBe(false);
+  });
+
+  it('queues them again in place and leaves the deployed ones alone', () => {
+    const deployed = item('first.tar', 'SUCCESS', { runId: 'run-1', exitCode: 0 });
+    const queue = [
+      deployed,
+      item('second.tar', 'FAILED', { runId: 'run-2', error: '실패', exitCode: 2 }),
+      item('third.tar', 'SKIPPED'),
+    ];
+    const retried = requeue(queue);
+
+    expect(retried.map((entry) => entry.file.name)).toEqual(['first.tar', 'second.tar', 'third.tar']);
+    // A package that deployed is not sent again, so the same object stays.
+    expect(retried[0]).toBe(deployed);
+    expect(retried.map((entry) => entry.status)).toEqual(['SUCCESS', 'QUEUED', 'QUEUED']);
+    // The outcome of the attempt that failed is dropped with it.
+    expect(retried[1].error).toBeUndefined();
+    expect(retried[1].runId).toBeUndefined();
+    expect(retried[1].exitCode).toBeUndefined();
+    // The retried packages keep their files, so nothing has to be picked again.
+    expect(retried[2].file).toBe(queue[2].file);
+  });
+
+  it('leaves a queue with nothing to retry untouched', () => {
+    const queue = [item('first.tar', 'SUCCESS'), item('second.tar', 'QUEUED')];
+    expect(requeue(queue)).toEqual(queue);
   });
 });
 
