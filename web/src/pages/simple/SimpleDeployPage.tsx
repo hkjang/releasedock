@@ -29,7 +29,7 @@ interface LogLine {
 
 type ItemStatus = 'QUEUED' | 'UPLOADING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'SKIPPED' | 'UNKNOWN';
 
-interface QueueItem {
+export interface QueueItem {
   key: string;
   file: File;
   status: ItemStatus;
@@ -91,6 +91,29 @@ export function stagesReached(run?: Pick<SimpleRun, 'replicationStatus' | 'appDe
   if (!run) return false;
   return [run.replicationStatus, run.appDeployStatus].some(
     (status) => status !== undefined && status !== 'NONE' && status !== 'SKIPPED',
+  );
+}
+
+// A package that did not deploy still holds its File in the browser, so it can
+// be sent again without picking it from disk. Being able to do that is what
+// makes the warning above actionable: the stages deferred to a package that
+// never deployed leave the upload half applied, and the fix is to deploy the
+// packages that are left. Only QUEUED packages are picked up by the start
+// button, though, so without this every one of them - stopped by the operator,
+// rejected at upload, failed while deploying - was stuck in the list with no
+// way to run it and no way to remove it either.
+export function retryablePackage(status: ItemStatus): boolean {
+  return status === 'FAILED' || status === 'TIMEOUT' || status === 'SKIPPED' || status === 'UNKNOWN';
+}
+
+// requeue puts those packages back in line where they were, dropping what the
+// previous attempt reported so a row does not keep showing an error for a run
+// that is about to be replaced. UNKNOWN is included on purpose: its run may
+// still be going, and if it is, the one-in-flight-per-target index rejects the
+// upload with a message that says so instead of deploying the package twice.
+export function requeue(items: QueueItem[]): QueueItem[] {
+  return items.map((item) =>
+    retryablePackage(item.status) ? { key: item.key, file: item.file, status: 'QUEUED' } : item,
   );
 }
 
@@ -325,6 +348,7 @@ export function SimpleDeployPage() {
   };
 
   const queuedCount = queue.filter((item) => item.status === 'QUEUED').length;
+  const retryCount = queue.filter((item) => retryablePackage(item.status)).length;
   const canStart = queuedCount > 0 && !running && Boolean(effectiveTarget?.ready ?? true) && (!mustChooseTarget || Boolean(targetId));
 
   if (loading) {
@@ -348,8 +372,8 @@ export function SimpleDeployPage() {
       {stranded && (
         <Alert severity="warning" onClose={() => setStranded(false)}>
           업로드당 한 번만 실행하도록 설정된 단계(복제·앱 배포)가 마지막 패키지로 미뤄졌으나, 그 패키지가 배포되지
-          않아 실행되지 않았습니다. 앞서 배포된 패키지의 이미지는 아직 복제되지 않았으므로 남은 패키지를 다시
-          배포하십시오.
+          않아 실행되지 않았습니다. 앞서 배포된 패키지의 이미지는 아직 복제되지 않았으므로 목록에서 <strong>다시
+          시도</strong>를 눌러 남은 패키지를 다시 배포하십시오.
         </Alert>
       )}
 
@@ -443,7 +467,7 @@ export function SimpleDeployPage() {
                           {item.exitCode !== undefined && item.exitCode !== null && ` · exit ${item.exitCode}`}
                         </Typography>
                       </Box>
-                      {item.status === 'QUEUED' && !running && (
+                      {!running && (
                         <IconButton size="small" aria-label={`${item.file.name} 제거`} onClick={() => removeItem(item.key)}>
                           <DeleteOutlineRoundedIcon fontSize="small" />
                         </IconButton>
@@ -468,6 +492,11 @@ export function SimpleDeployPage() {
                 {running && (
                   <Button color="inherit" onClick={() => { cancelledRef.current = true; }}>
                     남은 파일 중단
+                  </Button>
+                )}
+                {!running && retryCount > 0 && (
+                  <Button variant="outlined" onClick={() => setQueue((current) => requeue(current))}>
+                    {retryCount > 1 ? `${retryCount}개 다시 시도` : '다시 시도'}
                   </Button>
                 )}
                 {!running && Boolean(queue.length) && (
