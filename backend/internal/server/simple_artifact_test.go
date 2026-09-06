@@ -121,3 +121,74 @@ func TestStageSimpleArtifactCleansUpAnOversizePackage(t *testing.T) {
 		t.Fatalf("a rejected upload must leave nothing behind, directory holds %v", names)
 	}
 }
+
+// A killed process is the one path that skips discard, so the name a staging
+// file actually carries has to be the name startup looks for. Deriving the
+// expected name from stageSimpleArtifact keeps the two from drifting apart.
+func TestStagedUploadIsRecognisedByItsOwnName(t *testing.T) {
+	dir := t.TempDir()
+	server := stagingServer()
+	staged, err := server.stageSimpleArtifact(dir, "app.tar.gz", strings.NewReader("interrupted"), 1<<20)
+	if err != nil {
+		t.Fatalf("stageSimpleArtifact: %v", err)
+	}
+	if !isStagedUploadName(filepath.Base(staged.partial)) {
+		t.Fatalf("a staged upload must be recognisable by name, got %q", filepath.Base(staged.partial))
+	}
+	if isStagedUploadName("app.tar.gz") {
+		t.Fatal("a published package must never look like staging")
+	}
+}
+
+// The sweep runs against a directory an operator also keeps packages in, so it
+// must go by the exact token shape and not by the marker alone.
+func TestIsStagedUploadNameRejectsEverythingElse(t *testing.T) {
+	for _, name := range []string{
+		"app.tar.gz",
+		"app.tar.gz.partial-",
+		".partial-AAAAAAAAAAAAAAAAAAAAAA",
+		"app.tar.gz.partial-short",
+		"app.tar.gz.partial-AAAAAAAAAAAAAAAAAAAAAA.tar",
+		"app.tar.gz.partial-AAAAAAAAAAAAAAAAAAAA==",
+	} {
+		if isStagedUploadName(name) {
+			t.Fatalf("%q must not be taken for a staged upload", name)
+		}
+	}
+}
+
+// The upload directory holds the packages running deployments were handed, so
+// the startup sweep may take only the files this server staged and abandoned.
+func TestRemoveStagedUploadsTakesOnlyTheLeftovers(t *testing.T) {
+	dir := t.TempDir()
+	server := stagingServer()
+	// A staging file whose request never returned, as a killed process leaves it.
+	staged, err := server.stageSimpleArtifact(dir, "app.tar.gz", strings.NewReader("interrupted"), 1<<20)
+	if err != nil {
+		t.Fatalf("stageSimpleArtifact: %v", err)
+	}
+	for _, name := range []string{"app.tar.gz", "notes.partial-txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("keep me"), 0o640); err != nil {
+			t.Fatalf("could not seed the upload directory: %v", err)
+		}
+	}
+	// A directory named like staging belongs to somebody else.
+	if err := os.Mkdir(filepath.Join(dir, "old.tar.gz.partial-AAAAAAAAAAAAAAAAAAAAAA"), 0o750); err != nil {
+		t.Fatalf("could not seed the upload directory: %v", err)
+	}
+
+	// A target that was never used has no directory yet, and that is not a failure.
+	if removed := server.removeStagedUploads([]string{dir, filepath.Join(dir, "missing")}); removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if _, err := os.Stat(staged.partial); !os.IsNotExist(err) {
+		t.Fatalf("the leftover staging file must be gone, stat err = %v", err)
+	}
+	names := entries(t, dir)
+	if len(names) != 3 {
+		t.Fatalf("the sweep removed more than the leftover, directory holds %v", names)
+	}
+	if got := readFile(t, filepath.Join(dir, "app.tar.gz")); got != "keep me" {
+		t.Fatalf("the sweep replaced a package: %q", got)
+	}
+}
