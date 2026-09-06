@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -72,6 +73,67 @@ func (s *Server) RecoverSimpleRuns(ctx context.Context) {
 	if tag.RowsAffected() > 0 {
 		s.log.Warn("closed interrupted simple runs", "count", tag.RowsAffected())
 	}
+}
+
+// RemoveStagedSimpleUploads deletes the staged uploads a previous process left
+// behind. Every path createSimpleRun returns through discards its staging, so a
+// staged file that is still here at startup belongs to a process that was
+// killed mid-upload: nothing will ever commit it, no run row names it, and no
+// screen lists it, so it would sit in the target directory at full package size
+// until an operator went looking. Like RecoverSimpleRuns this assumes the API
+// process is the only one writing these directories.
+func (s *Server) RemoveStagedSimpleUploads(ctx context.Context) {
+	rows, err := s.store.Pool.Query(ctx, `SELECT DISTINCT upload_dir FROM simple_targets`)
+	if err != nil {
+		s.log.Warn("could not list simple upload directories", "error", err)
+		return
+	}
+	dirs := []string{}
+	for rows.Next() {
+		var dir string
+		if rows.Scan(&dir) != nil {
+			continue
+		}
+		dirs = append(dirs, dir)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		s.log.Warn("could not list simple upload directories", "error", err)
+		return
+	}
+	if removed := s.removeStagedUploads(dirs); removed > 0 {
+		s.log.Warn("removed staged simple uploads left by a previous process", "count", removed)
+	}
+}
+
+// removeStagedUploads sweeps the given directories and reports how many staged
+// uploads it removed. A directory that is gone is not a problem: the target may
+// never have been used.
+func (s *Server) removeStagedUploads(dirs []string) int {
+	removed := 0
+	for _, dir := range dirs {
+		items, err := os.ReadDir(dir)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				s.log.Warn("could not read a simple upload directory", "path", dir, "error", err)
+			}
+			continue
+		}
+		for _, item := range items {
+			// Only a regular file this server wrote itself: a directory or a
+			// link that happens to be named this way is somebody else's.
+			if !item.Type().IsRegular() || !isStagedUploadName(item.Name()) {
+				continue
+			}
+			path := filepath.Join(dir, item.Name())
+			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				s.log.Warn("could not remove a staged simple upload", "path", path, "error", err)
+				continue
+			}
+			removed++
+		}
+	}
+	return removed
 }
 
 // uiMode tells the browser which shell to render. Kept separate from /me so
@@ -342,6 +404,31 @@ type stagedArtifact struct {
 	checksum string
 }
 
+// A staged upload is named `<package>.stagedUploadMarker<token>`, which no
+// package can be called: safeArtifactName makes every accepted name end in
+// .tar or .tar.gz. That is what lets startup recognise the leftovers of a
+// killed process by name alone.
+const (
+	stagedUploadMarker = ".partial-"
+	stagedUploadBytes  = 16
+)
+
+// isStagedUploadName reports whether name is a staged upload this server wrote.
+// It insists on the exact token shape so an operator's own file that happens to
+// contain the marker is left where it is.
+func isStagedUploadName(name string) bool {
+	marker := strings.LastIndex(name, stagedUploadMarker)
+	if marker <= 0 {
+		return false
+	}
+	token := name[marker+len(stagedUploadMarker):]
+	if len(token) != base64.RawURLEncoding.EncodedLen(stagedUploadBytes) {
+		return false
+	}
+	_, err := base64.RawURLEncoding.DecodeString(token)
+	return err == nil
+}
+
 // stageSimpleArtifact writes the upload into the target directory under a
 // unique temporary name. Nothing at the package's own path is touched until
 // commit, so a caller that fails after this point can discard the upload
@@ -358,11 +445,11 @@ func (s *Server) stageSimpleArtifact(dir, filename string, file io.Reader, maxBy
 	if filepath.Dir(target) != filepath.Clean(root) {
 		return nil, errors.New("업로드 경로를 벗어나는 파일 이름입니다")
 	}
-	token, err := secure.RandomToken(16)
+	token, err := secure.RandomToken(stagedUploadBytes)
 	if err != nil {
 		return nil, errors.New("임시 파일 이름을 만들 수 없습니다")
 	}
-	staged := &stagedArtifact{server: s, path: target, partial: target + ".partial-" + token}
+	staged := &stagedArtifact{server: s, path: target, partial: target + stagedUploadMarker + token}
 	kept := false
 	defer func() {
 		if !kept {

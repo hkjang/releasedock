@@ -73,6 +73,9 @@ func main() {
 	// Simple-mode commands run inside this process, so anything still marked
 	// running belongs to a previous process whose children are already gone.
 	app.RecoverSimpleRuns(ctx)
+	// The same previous process may also have died between staging an upload
+	// and committing it, leaving a package-sized file nothing will ever claim.
+	app.RemoveStagedSimpleUploads(ctx)
 	httpServer := &http.Server{
 		Addr:              fmt.Sprintf(":%d", cfg.Port),
 		Handler:           app.Handler(),
