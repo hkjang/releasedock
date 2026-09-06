@@ -493,7 +493,7 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 				replicationStatus = stageStatusSkipped
 				logs.system("[replication] 업로드당 한 번만 실행하도록 설정되어 있어 마지막 파일에서 실행합니다")
 			case stageHeldForIncompleteUpload(cfg.ReplicationScope, uploadIncomplete):
-				replicationStatus = stageStatusSkipped
+				replicationStatus = stageStatusHeld
 				replicationHeld = true
 				logs.system("[replication] 같은 업로드의 다른 패키지가 배포되지 않아 복제를 실행하지 않았습니다")
 			default:
@@ -512,13 +512,17 @@ func (s *Server) executeSimpleRun(runID string, command resolvedCommand, args []
 			// yet, so the application deployment waits for it there too.
 			switch {
 			case stageHeldForIncompleteUpload(cfg.AppDeployScope, uploadIncomplete):
-				appDeployStatus = stageStatusSkipped
+				appDeployStatus = stageStatusHeld
 				appDeployHeld = true
 				logs.system("[app-deploy] 같은 업로드의 다른 패키지가 배포되지 않아 앱 배포를 실행하지 않았습니다")
 			case !appDeployStageRuns(cfg.AppDeployScope, batch.Last, replicationStatus):
 				appDeployStatus = stageStatusSkipped
 				switch {
 				case replicationHeld:
+					// The replication this stage waits for will not happen at
+					// all, so the application deployment is withheld too rather
+					// than left for a run that never comes.
+					appDeployStatus = stageStatusHeld
 					logs.system("[app-deploy] 복제를 실행하지 않았으므로 앱 배포도 실행하지 않았습니다")
 				case replicationStatus == stageStatusSkipped:
 					logs.system("[app-deploy] 복제를 마지막 파일에서 실행하므로 앱 배포도 마지막 파일에서 실행합니다")
@@ -1126,7 +1130,7 @@ func (s *Server) runReplication(ctx context.Context, cfg simpleSettings, runID s
 // stageFailed reads a post-deployment stage outcome. A stage that never ran,
 // deliberately or because it is off, is not a failure; anything else is.
 func stageFailed(status string) bool {
-	return status != stageStatusNone && status != stageStatusSkipped && status != stageStatusSuccess
+	return status != stageStatusNone && status != stageStatusSuccess && !stageDeferred(status)
 }
 
 // runAppDeploy runs the configured application deployment command. It is a

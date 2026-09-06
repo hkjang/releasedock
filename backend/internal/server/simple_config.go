@@ -31,12 +31,25 @@ const (
 )
 
 // A stage that is off leaves NONE, one that was left for another run of the
-// same upload leaves SKIPPED, and neither counts as a failure.
+// same upload leaves SKIPPED, and one that was withheld because the upload it
+// acts on is incomplete leaves HELD. None of them counts as a failure of the
+// stage itself, but they mean very different things to whoever reads the run:
+// SKIPPED says the stage runs later, HELD says it never runs and the upload is
+// only partly in place.
 const (
 	stageStatusNone    = "NONE"
 	stageStatusSkipped = "SKIPPED"
+	stageStatusHeld    = "HELD"
 	stageStatusSuccess = "SUCCESS"
 )
+
+// stageDeferred reports whether a stage has not been carried out yet, either
+// because it waits for a later package of the upload or because it was withheld
+// for good. What the stages that follow need to know is only that nothing has
+// happened, so both answer yes.
+func stageDeferred(status string) bool {
+	return status == stageStatusSkipped || status == stageStatusHeld
+}
 
 type simpleSettings struct {
 	DefaultUIMode        string   `json:"defaultUiMode"`
@@ -110,7 +123,7 @@ func stageRuns(scope string, batchLast bool) bool {
 // very state the stage ordering exists to prevent. The deferred replication
 // and this stage then both happen on the last run of the batch.
 func appDeployStageRuns(scope string, batchLast bool, replicationStatus string) bool {
-	if replicationStatus == stageStatusSkipped {
+	if stageDeferred(replicationStatus) {
 		return false
 	}
 	return stageRuns(scope, batchLast)

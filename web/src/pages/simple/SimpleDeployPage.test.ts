@@ -15,6 +15,10 @@ describe('once-per-upload stages that lost the package carrying them', () => {
     expect(stagesDeferred({ replicationStatus: 'SUCCESS', appDeployStatus: 'SUCCESS' })).toBe(false);
     expect(stagesDeferred({ replicationStatus: 'NONE', appDeployStatus: 'NONE' })).toBe(false);
     expect(stagesDeferred({})).toBe(false);
+    // A stage withheld for good did not happen here either, and no later
+    // package is going to carry it.
+    expect(stagesDeferred({ replicationStatus: 'HELD', appDeployStatus: 'HELD' })).toBe(true);
+    expect(stagesReached({ replicationStatus: 'HELD', appDeployStatus: 'HELD' })).toBe(false);
   });
 
   it('counts a stage as reached once it produced an outcome, failure included', () => {

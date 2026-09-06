@@ -111,3 +111,27 @@ func TestUploadHasFailedPackagesLooksAtTheRestOfTheBatch(t *testing.T) {
 		t.Fatal("an unrelated batch must not be counted")
 	}
 }
+
+// Holding a stage is only useful if the run can say so, so the stored states
+// have to include HELD next to SKIPPED. A constraint that rejected it would
+// lose the outcome of the run at the moment it matters most.
+func TestSimpleRunStoresAHeldStage(t *testing.T) {
+	s, targetID := newSimpleBatchFixture(t)
+	const runID = "cc000000-0000-4000-8000-000000000001"
+	seedSimpleRun(t, s, targetID, runID, "batch-held", "RUNNING", true)
+
+	if _, err := s.store.Pool.Exec(t.Context(),
+		`UPDATE simple_runs SET status='FAILED',replication_status=$2,app_deploy_status=$2,finished_at=now() WHERE id=$1`,
+		runID, stageStatusHeld); err != nil {
+		t.Fatalf("record a held stage: %v", err)
+	}
+	var replication, appDeploy string
+	if err := s.store.Pool.QueryRow(t.Context(),
+		`SELECT replication_status,app_deploy_status FROM simple_runs WHERE id=$1`, runID).
+		Scan(&replication, &appDeploy); err != nil {
+		t.Fatalf("read the held stages back: %v", err)
+	}
+	if replication != stageStatusHeld || appDeploy != stageStatusHeld {
+		t.Fatalf("stages = %s/%s, want HELD/HELD", replication, appDeploy)
+	}
+}

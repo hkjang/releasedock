@@ -25,19 +25,24 @@ import { formatBytes, formatDate, formatDuration } from '../../utils/format';
 
 const TERMINAL = ['SUCCESS', 'FAILED', 'TIMEOUT'];
 
-function statusColor(status: string): 'default' | 'info' | 'success' | 'error' | 'warning' {
+export function statusColor(status: string): 'default' | 'info' | 'success' | 'error' | 'warning' {
   if (status === 'SUCCESS') return 'success';
   if (status === 'FAILED') return 'error';
-  if (status === 'TIMEOUT') return 'warning';
+  if (status === 'TIMEOUT' || status === 'HELD') return 'warning';
   if (status === 'RUNNING' || status === 'PENDING') return 'info';
   return 'default';
 }
 
 // SKIPPED is not a problem: the stage was configured to run once per upload
 // and belongs to another file's run, so it is spelled out rather than shown
-// as a bare state name.
-function stageLabel(status: string): string {
-  return status === 'SKIPPED' ? '건너뜀 (마지막 파일에서 실행)' : status;
+// as a bare state name. HELD is the opposite and must not read like it: the
+// stage was withheld because a package of this upload never deployed, so
+// nothing was mirrored and the application was never rolled over, and no later
+// file is going to do it either.
+export function stageLabel(status: string): string {
+  if (status === 'SKIPPED') return '건너뜀 (마지막 파일에서 실행)';
+  if (status === 'HELD') return '실행 안 함 (업로드의 다른 패키지가 배포되지 않음)';
+  return status;
 }
 
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
@@ -197,6 +202,10 @@ export function SimpleRunDetailPage() {
                       <Chip size="small" label={stageLabel(detail.replicationStatus)} color={statusColor(detail.replicationStatus)} />
                       {Boolean(detail.replicationExecutionId) && (
                         <Typography variant="body2" color="text.secondary">execution {detail.replicationExecutionId}</Typography>
+                      )}
+                      {/* Why the mirroring failed belongs next to the stage, as it does for the application deployment. */}
+                      {Boolean(detail.replicationError) && (
+                        <Typography variant="body2" color="text.secondary">{detail.replicationError}</Typography>
                       )}
                     </Stack>
                   }

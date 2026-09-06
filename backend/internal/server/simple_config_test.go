@@ -279,8 +279,32 @@ func TestOutcomeWithoutStageSettingsFailsARunThatSkippedTheStages(t *testing.T) 
 	}
 }
 
+// A stage that was withheld because the upload is incomplete is not a stage
+// that runs later, and the difference is the whole point of telling them apart:
+// the reader of a held run must not be sent to wait for a file that will never
+// carry it. Everything the stages that follow decide, however, has to treat the
+// two the same, because in both cases nothing has been mirrored or rolled over.
+func TestHeldStageIsDeferredButNotSkipped(t *testing.T) {
+	if !stageDeferred(stageStatusHeld) || !stageDeferred(stageStatusSkipped) {
+		t.Fatal("both a deferred and a held stage mean nothing has happened yet")
+	}
+	for _, status := range []string{stageStatusNone, stageStatusSuccess, "FAILED", "RUNNING"} {
+		if stageDeferred(status) {
+			t.Fatalf("%s must not count as a stage that has not happened", status)
+		}
+	}
+	if stageStatusHeld == stageStatusSkipped {
+		t.Fatal("the two states must stay distinguishable in a stored run")
+	}
+	// The application deployment waits for a replication that was held exactly
+	// as it waits for one that was deferred: neither mirrored anything.
+	if appDeployStageRuns(stageScopeEach, true, stageStatusHeld) {
+		t.Fatal("an app deploy must not run after a replication that was held back")
+	}
+}
+
 func TestStageFailedTreatsSkippedAsNotAFailure(t *testing.T) {
-	for _, status := range []string{"NONE", "SKIPPED", "SUCCESS"} {
+	for _, status := range []string{"NONE", "SKIPPED", "HELD", "SUCCESS"} {
 		if stageFailed(status) {
 			t.Fatalf("%s must not count as a stage failure", status)
 		}

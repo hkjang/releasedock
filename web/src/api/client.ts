@@ -232,8 +232,9 @@ export interface SimpleLogLine {
 }
 
 // A post-deployment stage either did not apply (NONE), was deliberately left
-// to the last package of the upload (SKIPPED), or ran and has an outcome.
-export type StageStatus = 'NONE' | 'SKIPPED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
+// to the last package of the upload (SKIPPED), was withheld for good because a
+// package of that upload never deployed (HELD), or ran and has an outcome.
+export type StageStatus = 'NONE' | 'SKIPPED' | 'HELD' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
 
 export interface SimpleRun {
   id: string;

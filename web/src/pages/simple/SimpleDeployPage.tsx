@@ -77,9 +77,13 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 // rolled over. The two helpers below detect exactly that.
 
 // stagesDeferred reports whether a finished run pushed a stage onto the last
-// package of its upload. SKIPPED is the only status that means "not here".
+// package of its upload. SKIPPED and HELD are the statuses that mean "not
+// here"; HELD additionally means it will not happen anywhere, which the run
+// itself already reports as a failure.
 export function stagesDeferred(run: Pick<SimpleRun, 'replicationStatus' | 'appDeployStatus'>): boolean {
-  return run.replicationStatus === 'SKIPPED' || run.appDeployStatus === 'SKIPPED';
+  return [run.replicationStatus, run.appDeployStatus].some(
+    (status) => status === 'SKIPPED' || status === 'HELD',
+  );
 }
 
 // stagesReached reports whether the run that was supposed to carry the
@@ -90,7 +94,7 @@ export function stagesDeferred(run: Pick<SimpleRun, 'replicationStatus' | 'appDe
 export function stagesReached(run?: Pick<SimpleRun, 'replicationStatus' | 'appDeployStatus'>): boolean {
   if (!run) return false;
   return [run.replicationStatus, run.appDeployStatus].some(
-    (status) => status !== undefined && status !== 'NONE' && status !== 'SKIPPED',
+    (status) => status !== undefined && status !== 'NONE' && status !== 'SKIPPED' && status !== 'HELD',
   );
 }
 
