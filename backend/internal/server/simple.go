@@ -1079,7 +1079,10 @@ func (s *Server) listSimpleRunLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 	items := []map[string]any{}
-	var lastID int64
+	// A page with no rows leaves the cursor where the caller had it. Reporting 0
+	// instead would tell a caller that asked past the end of the log to start
+	// over from the first line.
+	lastID := after
 	for rows.Next() {
 		var id int64
 		var stream string
