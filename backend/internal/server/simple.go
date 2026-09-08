@@ -1116,14 +1116,36 @@ func (s *Server) downloadSimpleRunLog(w http.ResponseWriter, r *http.Request, ru
 	}
 	defer rows.Close()
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	// The run id is a UUID, so it is safe inside the header value.
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"releasedock-run-%s.log\"", runID))
+	w.Header().Set("Content-Disposition", runLogDisposition(filename, status, runID))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusOK)
+	writeSimpleRunLog(w, rows)
+}
+
+// simpleRunLogTruncatedNotice ends a download that could not be read to the
+// end. It is deliberately in the file rather than only in the server log,
+// because the file is what the operator keeps.
+const simpleRunLogTruncatedNotice = "[releasedock] 로그를 끝까지 읽지 못해 이 파일은 잘려 있습니다: "
+
+// logRowScanner is the part of pgx.Rows this rendering needs, so the truncation
+// path can be exercised without a database.
+type logRowScanner interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+}
+
+// writeSimpleRunLog renders stored log rows as the plain-text download. The
+// status line and the headers are already sent by the time a row fails to
+// read, so a failure cannot turn the response into an error: without a notice
+// in the body the operator saves a log that stops mid-run and looks complete -
+// and this log is what an audit reads to decide whether a deployment ran.
+func writeSimpleRunLog(w io.Writer, rows logRowScanner) {
 	for rows.Next() {
 		var stream string
 		var payload []byte
-		if rows.Scan(&stream, &payload) != nil {
+		if err := rows.Scan(&stream, &payload); err != nil {
+			fmt.Fprintf(w, "%s%v\n", simpleRunLogTruncatedNotice, err)
 			return
 		}
 		prefix := ""
@@ -1132,6 +1154,83 @@ func (s *Server) downloadSimpleRunLog(w http.ResponseWriter, r *http.Request, ru
 		}
 		fmt.Fprintf(w, "%s%s\n", prefix, payload)
 	}
+	// Next returning false does not mean the log ended: a connection lost part
+	// way through the result set also stops the loop, and only Err tells them
+	// apart.
+	if err := rows.Err(); err != nil {
+		fmt.Fprintf(w, "%s%v\n", simpleRunLogTruncatedNotice, err)
+	}
+}
+
+// runLogDisposition names the saved file after the package and how the run
+// ended. The run id alone is what the browser used to save, so several logs
+// downloaded while working through a failed upload could not be told apart
+// without opening them. `filename` carries a conservative ASCII form because
+// the value goes into a header and onto a file system, and `filename*` carries
+// the exact name for the browsers that read it - package names here are often
+// Korean, and reducing them to ASCII would leave nothing to recognise.
+func runLogDisposition(filename, status, runID string) string {
+	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s",
+		runLogDownloadName(filename, status, runID, false),
+		encodeExtendedHeaderValue(runLogDownloadName(filename, status, runID, true)))
+}
+
+// runLogDownloadName joins the package, the outcome and the run id into one
+// file name. Anything outside a conservative set is replaced rather than
+// escaped, so no quote or newline can reach the header; unicode is kept only
+// for the extended form.
+func runLogDownloadName(filename, status, runID string, keepUnicode bool) string {
+	parts := []string{"releasedock"}
+	if name := sanitizeNameSegment(filename, 60, keepUnicode); name != "" {
+		parts = append(parts, name)
+	}
+	if outcome := sanitizeNameSegment(status, 16, false); outcome != "" {
+		parts = append(parts, outcome)
+	}
+	id := sanitizeNameSegment(runID, 40, false)
+	if id == "" {
+		id = "run"
+	}
+	return strings.Join(append(parts, id), "-") + ".log"
+}
+
+// sanitizeNameSegment keeps letters, digits and the few punctuation marks that
+// are safe everywhere, collapsing every run of anything else into a single
+// dash. limit counts runes, so a long package name cannot stretch the header.
+func sanitizeNameSegment(value string, limit int, keepUnicode bool) string {
+	var out []rune
+	for _, r := range value {
+		safe := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '.' || r == '_'
+		if keepUnicode && r > 0x7f {
+			safe = true
+		}
+		if !safe {
+			if len(out) > 0 && out[len(out)-1] == '-' {
+				continue
+			}
+			r = '-'
+		}
+		out = append(out, r)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return strings.Trim(string(out), "-.")
+}
+
+// encodeExtendedHeaderValue percent-encodes for the RFC 5987 form used by
+// `filename*`. Every byte outside the unreserved set is encoded, which is a
+// subset of what the grammar allows and therefore always valid.
+func encodeExtendedHeaderValue(value string) string {
+	var out strings.Builder
+	for _, b := range []byte(value) {
+		if b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '.' || b == '_' || b == '-' {
+			out.WriteByte(b)
+			continue
+		}
+		fmt.Fprintf(&out, "%%%02X", b)
+	}
+	return out.String()
 }
 
 // runReplication triggers the configured Harbor rule and waits for it to
