@@ -40,6 +40,47 @@ function stageLabel(status: string): string {
   return status === 'SKIPPED' ? '건너뜀 (마지막 파일에서 실행)' : status;
 }
 
+// MAX_LOG_PAGES bounds how many pages the view fetches at once, so opening a
+// run that wrote a very long log does not tie the browser up indefinitely.
+export const MAX_LOG_PAGES = 50;
+
+// LOG_TRUNCATED_NOTICE ends a copied log that the view could not hold. The
+// download serves the whole thing; a paste that silently stops part way through
+// looks like a run that ended there.
+export const LOG_TRUNCATED_NOTICE =
+  '[releasedock] 화면에 담을 수 있는 줄 수를 넘어 여기까지만 표시했습니다. 전체 로그는 내려받기를 사용하십시오.';
+
+export type LogPage = { items: SimpleLogLine[]; lastId: number; hasMore: boolean };
+
+// nextLogCursor leaves the cursor alone when a page came back empty. The last
+// page of a log is full whenever the line count is a multiple of the page size,
+// so the server reports hasMore and the next request returns nothing; taking
+// that page's lastId would rewind to the start of the run and make the live
+// stream resend every line the view already has.
+export function nextLogCursor(current: number, page: LogPage): number {
+  return page.items.length ? page.lastId : current;
+}
+
+// collectStoredLogs reads stored lines page by page so a run that finished long
+// ago shows its full output. It reports truncated when the page budget ran out
+// with more still waiting, because the reader would otherwise take a log that
+// stops mid-run for the whole of it - and this log is what tells them whether a
+// deployment did what it was supposed to.
+export async function collectStoredLogs(
+  fetchPage: (after: number) => Promise<LogPage>,
+  maxPages = MAX_LOG_PAGES,
+): Promise<{ lines: SimpleLogLine[]; cursor: number; truncated: boolean }> {
+  const lines: SimpleLogLine[] = [];
+  let cursor = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const response = await fetchPage(cursor);
+    lines.push(...response.items);
+    cursor = nextLogCursor(cursor, response);
+    if (!response.hasMore || !response.items.length) return { lines, cursor, truncated: false };
+  }
+  return { lines, cursor, truncated: true };
+}
+
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   return (
     <Box sx={{ minWidth: 0 }}>
@@ -54,6 +95,7 @@ export function SimpleRunDetailPage() {
   const run = useAsync(() => api.simpleRun(id), [id]);
   const [logs, setLogs] = useState<SimpleLogLine[]>([]);
   const [logError, setLogError] = useState('');
+  const [logTruncated, setLogTruncated] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(true);
   const [copied, setCopied] = useState(false);
   const lastIdRef = useRef(0);
@@ -68,16 +110,10 @@ export function SimpleRunDetailPage() {
     setLoadingLogs(true);
     setLogError('');
     try {
-      let after = 0;
-      const collected: SimpleLogLine[] = [];
-      for (let page = 0; page < 50; page += 1) {
-        const response = await api.simpleRunLogs(id, after);
-        collected.push(...response.items);
-        after = response.lastId;
-        if (!response.hasMore) break;
-      }
-      lastIdRef.current = after;
-      setLogs(collected);
+      const stored = await collectStoredLogs((after) => api.simpleRunLogs(id, after));
+      lastIdRef.current = stored.cursor;
+      setLogs(stored.lines);
+      setLogTruncated(stored.truncated);
     } catch (cause) {
       setLogError(cause instanceof ApiError ? cause.message : '로그를 불러오지 못했습니다.');
     } finally {
@@ -117,7 +153,8 @@ export function SimpleRunDetailPage() {
   }, [logs, live]);
 
   const copy = async () => {
-    await navigator.clipboard.writeText(logs.map((line) => line.message).join('\n'));
+    const text = logs.map((line) => line.message).join('\n');
+    await navigator.clipboard.writeText(logTruncated ? `${text}\n${LOG_TRUNCATED_NOTICE}` : text);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   };
@@ -236,6 +273,11 @@ export function SimpleRunDetailPage() {
             </Stack>
             <Divider sx={{ mb: 1.5 }} />
             {logError && <Alert severity="error" sx={{ mb: 1.5 }}>{logError}</Alert>}
+            {logTruncated && (
+              <Alert severity="warning" sx={{ mb: 1.5 }}>
+                출력이 길어 처음 {logs.length.toLocaleString()}줄만 표시했습니다. 전체 로그는 위의 &lsquo;로그 내려받기&rsquo;로 받으십시오.
+              </Alert>
+            )}
             {loadingLogs ? (
               <Stack alignItems="center" sx={{ py: 4 }}><CircularProgress size={24} /></Stack>
             ) : (
