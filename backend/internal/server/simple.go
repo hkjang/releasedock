@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -224,26 +225,99 @@ type uploadBatch struct {
 
 // readUploadBatch reads the optional batch fields from the multipart form. A
 // request that says nothing is one package on its own, so it is its own last
-// run and the once-per-upload stages fire for it as they always have.
-func readUploadBatch(r *http.Request) uploadBatch {
+// run and the once-per-upload stages fire for it as they always have. The
+// values are looked up rather than taken from the request because the form is
+// never parsed as a whole: see readSimpleUploadFields.
+func readUploadBatch(value func(string) string) uploadBatch {
 	batch := uploadBatch{Last: true}
 	// The identifier is only ever echoed back and grouped on, but keeping it to
 	// an opaque token means nothing arbitrary is stored on the run. A rejected
 	// identifier costs the grouping, never the ordering: the marker that says
 	// which run carries the once-per-upload stages is read regardless.
-	id := strings.TrimSpace(r.FormValue("batchId"))
+	id := strings.TrimSpace(value("batchId"))
 	if len(id) <= 64 && strings.IndexFunc(id, func(char rune) bool {
 		return !(char >= 'a' && char <= 'z') && !(char >= 'A' && char <= 'Z') &&
 			!(char >= '0' && char <= '9') && char != '-' && char != '_'
 	}) < 0 {
 		batch.ID = id
 	}
-	if raw := strings.TrimSpace(r.FormValue("batchLast")); raw != "" {
+	if raw := strings.TrimSpace(value("batchLast")); raw != "" {
 		if last, err := strconv.ParseBool(raw); err == nil {
 			batch.Last = last
 		}
 	}
 	return batch
+}
+
+// The upload carries one package and two short batch fields, so the request is
+// walked part by part under these bounds instead of being parsed as a form.
+// http.Request.ParseMultipartForm buffers every file part before the handler
+// sees it - up to maxMemory in memory and the rest in a temporary file - which
+// for a package of the default 10 GiB limit means writing it to os.TempDir in
+// full and then copying it into the target directory: twice the disk, and on a
+// host whose /tmp is tmpfs (the server unit runs with PrivateTmp=true, so it
+// inherits whatever backs /tmp) the first copy is memory.
+const (
+	maxSimpleUploadFieldBytes = 4 << 10
+	maxSimpleUploadFields     = 8
+)
+
+// simpleUploadFields holds the non-file parts of an upload.
+type simpleUploadFields map[string]string
+
+func (f simpleUploadFields) value(name string) string { return f[name] }
+
+// read stores one part if it is a field this endpoint could want. A file part
+// is never buffered here: the package is streamed to disk by the caller, and
+// any other file is not something this endpoint accepts.
+func (f simpleUploadFields) read(part *multipart.Part) {
+	if part.FileName() != "" || part.FormName() == "" || len(f) >= maxSimpleUploadFields {
+		return
+	}
+	value, err := io.ReadAll(io.LimitReader(part, maxSimpleUploadFieldBytes))
+	if err != nil {
+		return
+	}
+	f[part.FormName()] = string(value)
+}
+
+// errMissingArtifact means the request held no package, which is a different
+// answer to the caller than a request whose multipart stream could not be read.
+var errMissingArtifact = errors.New("upload has no artifact part")
+
+// nextSimpleArtifactPart advances the stream to the package, collecting the
+// fields sent before it. The returned part is positioned at the start of the
+// package body and is read from directly, so the upload is never buffered.
+func nextSimpleArtifactPart(parts *multipart.Reader, fields simpleUploadFields) (*multipart.Part, error) {
+	for {
+		part, err := parts.NextPart()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, errMissingArtifact
+			}
+			return nil, err
+		}
+		if part.FormName() == "artifact" && part.FileName() != "" {
+			return part, nil
+		}
+		fields.read(part)
+		part.Close() //nolint:errcheck
+	}
+}
+
+// readSimpleUploadFields collects the fields that follow the package. The
+// browser sends the file first, so this is where the batch fields normally
+// arrive; a request that ends early simply leaves them unset, which is the
+// same as not sending them.
+func readSimpleUploadFields(parts *multipart.Reader, fields simpleUploadFields) {
+	for {
+		part, err := parts.NextPart()
+		if err != nil {
+			return
+		}
+		fields.read(part)
+		part.Close() //nolint:errcheck
+	}
 }
 
 // createSimpleRun stores the uploaded package in the target's directory and
@@ -285,25 +359,28 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, target.MaxUploadBytes+(2<<20))
-	if err := r.ParseMultipartForm(16 << 20); err != nil {
+	parts, err := r.MultipartReader()
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_upload", "패키지 업로드를 읽을 수 없습니다")
 		return
 	}
-	defer r.MultipartForm.RemoveAll() //nolint:errcheck
-	file, header, err := r.FormFile("artifact")
-	if err != nil {
+	fields := simpleUploadFields{}
+	file, err := nextSimpleArtifactPart(parts, fields)
+	if errors.Is(err, errMissingArtifact) {
 		writeError(w, http.StatusBadRequest, "invalid_upload", "artifact 파일이 필요합니다")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_upload", "패키지 업로드를 읽을 수 없습니다")
 		return
 	}
 	defer file.Close() //nolint:errcheck
 
-	filename := filepath.Base(strings.TrimSpace(header.Filename))
+	filename := filepath.Base(strings.TrimSpace(file.FileName()))
 	if !safeArtifactName(filename) {
 		writeError(w, http.StatusBadRequest, "invalid_filename", "파일 이름은 경로 없이 .tar 또는 .tar.gz로 끝나야 합니다")
 		return
 	}
-
-	batch := readUploadBatch(r)
 
 	p, _ := principalFrom(r)
 	if !s.acquireSimpleRun() {
@@ -328,6 +405,13 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 			staged.discard()
 		}
 	}()
+
+	// The browser sends the package first, so the batch fields are read once it
+	// is safely on disk. A request that named them before the package has had
+	// them collected already, and reading is what the run is stored with either
+	// way.
+	readSimpleUploadFields(parts, fields)
+	batch := readUploadBatch(fields.value)
 
 	runID, err := secure.NewID()
 	if err != nil {
