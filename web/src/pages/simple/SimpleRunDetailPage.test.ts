@@ -1,5 +1,11 @@
-import { collectStoredLogs, nextLogCursor, type LogPage } from './SimpleRunDetailPage';
-import type { SimpleLogLine } from '../../api/client';
+import {
+  collectStoredLogs,
+  nextLogCursor,
+  undeployedPackages,
+  uploadPackages,
+  type LogPage,
+} from './SimpleRunDetailPage';
+import type { SimpleBatchSibling, SimpleLogLine, SimpleRun } from '../../api/client';
 
 function line(id: number): SimpleLogLine {
   return { id, stream: 'stdout', message: `line ${id}`, createdAt: '2026-09-09T00:00:00Z' };
@@ -75,5 +81,79 @@ describe('paging through the stored lines of a run', () => {
   it('leaves the cursor alone for an empty page and advances it for a filled one', () => {
     expect(nextLogCursor(41, { items: [], lastId: 0, hasMore: true })).toBe(41);
     expect(nextLogCursor(41, { items: [line(42)], lastId: 42, hasMore: false })).toBe(42);
+  });
+});
+
+function sibling(id: string, createdAt: string, status: SimpleBatchSibling['status'], last = false): SimpleBatchSibling {
+  return { id, filename: `${id}.tar.gz`, status, batchLast: last, createdAt };
+}
+
+function runDetail(overrides: Partial<SimpleRun> = {}): SimpleRun {
+  return {
+    id: 'run-b',
+    targetName: 'portal',
+    filename: 'run-b.tar.gz',
+    status: 'SUCCESS',
+    exitCode: 0,
+    commandSource: 'PER_TARGET',
+    commandPath: '/opt/deploy/run.sh',
+    sizeBytes: 1,
+    createdAt: '2026-09-09T00:00:02Z',
+    startedAt: null,
+    finishedAt: null,
+    ...overrides,
+  };
+}
+
+describe('the packages of one upload', () => {
+  it('lists the run being viewed among its siblings in deploy order', () => {
+    const detail = runDetail({
+      batchId: 'batch-1',
+      batchLast: true,
+      batchSiblings: [
+        sibling('run-c', '2026-09-09T00:00:03Z', 'SUCCESS'),
+        sibling('run-a', '2026-09-09T00:00:01Z', 'FAILED'),
+      ],
+    });
+    const packages = uploadPackages(detail);
+    expect(packages.map((item) => item.id)).toEqual(['run-a', 'run-b', 'run-c']);
+    expect(packages.map((item) => item.current)).toEqual([false, true, false]);
+    expect(packages[1].batchLast).toBe(true);
+  });
+
+  // A single package is its own upload, so there is no relationship to draw and
+  // the section stays off the screen.
+  it('lists nothing for a run that was uploaded on its own', () => {
+    expect(uploadPackages(runDetail())).toEqual([]);
+    expect(uploadPackages(runDetail({ batchId: 'batch-1', batchSiblings: [] }))).toEqual([]);
+  });
+
+  it('settles two packages stored in the same instant by id', () => {
+    const detail = runDetail({
+      createdAt: '2026-09-09T00:00:01Z',
+      batchSiblings: [sibling('run-a', '2026-09-09T00:00:01Z', 'SUCCESS')],
+    });
+    expect(uploadPackages(detail).map((item) => item.id)).toEqual(['run-a', 'run-b']);
+  });
+
+  it('counts the packages that finished without deploying', () => {
+    const detail = runDetail({
+      status: 'FAILED',
+      batchSiblings: [
+        sibling('run-a', '2026-09-09T00:00:01Z', 'SUCCESS'),
+        sibling('run-c', '2026-09-09T00:00:03Z', 'TIMEOUT'),
+      ],
+    });
+    expect(undeployedPackages(uploadPackages(detail))).toBe(2);
+  });
+
+  // A package still going has not failed. Counting it would tell the reader the
+  // upload is missing something when it is only unfinished.
+  it('does not count a package that has not finished', () => {
+    const detail = runDetail({
+      status: 'RUNNING',
+      batchSiblings: [sibling('run-a', '2026-09-09T00:00:01Z', 'PENDING')],
+    });
+    expect(undeployedPackages(uploadPackages(detail))).toBe(0);
   });
 });

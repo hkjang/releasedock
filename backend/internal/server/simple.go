@@ -962,13 +962,16 @@ func (s *Server) listSimpleRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.authorizeRun(r, r.PathValue("id")); err != nil {
+	actorID, err := s.authorizeRun(r, r.PathValue("id"))
+	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
 		return
 	}
 	var id, targetName, filename, storedPath, checksum, status, source, commandPath, errorText, actorName string
 	var replicationStatus, replicationError string
 	var appDeployStatus, appDeployError string
+	var batchID string
+	var batchLast bool
 	var replicationExecutionID int64
 	var args []string
 	var exitCode *int
@@ -976,11 +979,11 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 	var timeout int
 	var created time.Time
 	var startedAt, finishedAt *time.Time
-	err := s.store.Pool.QueryRow(r.Context(), `SELECT run.id::text,target.name,run.original_filename,
+	err = s.store.Pool.QueryRow(r.Context(), `SELECT run.id::text,target.name,run.original_filename,
 		run.stored_path,run.sha256,run.status,run.command_source,run.resolved_command_path,
 		run.resolved_command_args,run.resolved_timeout_seconds,run.exit_code,run.error,run.size_bytes,
 		run.replication_status,COALESCE(run.replication_execution_id,0),run.replication_error,
-		run.app_deploy_status,run.app_deploy_error,
+		run.app_deploy_status,run.app_deploy_error,COALESCE(run.batch_id,''),run.batch_last,
 		run.created_at,run.started_at,run.finished_at,COALESCE(user_account.display_name,'')
 		FROM simple_runs run
 		JOIN simple_targets target ON target.id=run.target_id
@@ -989,7 +992,7 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 		Scan(&id, &targetName, &filename, &storedPath, &checksum, &status, &source, &commandPath,
 			&args, &timeout, &exitCode, &errorText, &size,
 			&replicationStatus, &replicationExecutionID, &replicationError,
-			&appDeployStatus, &appDeployError,
+			&appDeployStatus, &appDeployError, &batchID, &batchLast,
 			&created, &startedAt, &finishedAt, &actorName)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "not_found", "실행 기록을 찾을 수 없습니다")
@@ -1002,6 +1005,16 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 	if args == nil {
 		args = []string{}
 	}
+	// The other packages of the same upload. A held stage says the upload did
+	// not go through as a whole, and this is what says which package is the
+	// reason - without it the reader has to pick the run out of the history by
+	// eye.
+	siblings, siblingsErr := s.listBatchSiblings(r.Context(), batchID, id, actorID)
+	siblingsError := ""
+	if siblingsErr != nil {
+		s.log.Warn("could not list the other runs of an upload", "run", id, "error", siblingsErr)
+		siblingsError = "같은 업로드의 다른 실행을 불러오지 못했습니다"
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "targetName": targetName, "filename": filename, "storedPath": storedPath,
 		"sha256": checksum, "status": status, "commandSource": source, "commandPath": commandPath,
@@ -1011,7 +1024,56 @@ func (s *Server) getSimpleRun(w http.ResponseWriter, r *http.Request) {
 		"replicationStatus": replicationStatus, "replicationExecutionId": replicationExecutionID,
 		"replicationError": replicationError,
 		"appDeployStatus":  appDeployStatus, "appDeployError": appDeployError,
+		"batchId": batchID, "batchLast": batchLast,
+		"batchSiblings": siblings, "batchSiblingsError": siblingsError,
 	})
+}
+
+// maxSimpleBatchSiblings bounds the list of packages shown for one upload. An
+// upload is what one click produced, so this is far past any real batch; it
+// only stops a client that reuses a single identifier for everything from
+// turning the run screen into an unbounded listing of its own history.
+const maxSimpleBatchSiblings = 100
+
+// listBatchSiblings returns the other runs of the same upload, oldest first.
+// The batch identifier comes from the client, so a stranger's run that happens
+// to carry the same one must not be listed: the caller was authorised for this
+// run's actor, and that is exactly whose runs these are restricted to.
+//
+// A read that stops part way through is reported rather than returned as a
+// short list: a screen that shows only the packages that succeeded, because the
+// row naming the failed one never arrived, is worse than one that says it could
+// not look.
+func (s *Server) listBatchSiblings(ctx context.Context, batchID, runID, actorID string) ([]map[string]any, error) {
+	items := []map[string]any{}
+	if batchID == "" || actorID == "" {
+		return items, nil
+	}
+	rows, err := s.store.Pool.Query(ctx, `SELECT run.id::text,run.original_filename,run.status,
+		run.batch_last,run.created_at
+		FROM simple_runs run
+		WHERE run.batch_id=$1 AND run.actor_id=$2 AND run.id<>$3
+		ORDER BY run.created_at,run.id LIMIT $4`, batchID, actorID, runID, maxSimpleBatchSiblings)
+	if err != nil {
+		return items, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, filename, status string
+		var last bool
+		var created time.Time
+		if err := rows.Scan(&id, &filename, &status, &last, &created); err != nil {
+			return []map[string]any{}, err
+		}
+		items = append(items, map[string]any{
+			"id": id, "filename": filename, "status": status,
+			"batchLast": last, "createdAt": created,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return []map[string]any{}, err
+	}
+	return items, nil
 }
 
 // streamSimpleRunLogs mirrors streamReleaseLogs: poll every second, keepalive

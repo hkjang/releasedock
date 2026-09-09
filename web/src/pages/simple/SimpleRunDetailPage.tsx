@@ -17,7 +17,7 @@ import {
 import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
 import DownloadRoundedIcon from '@mui/icons-material/DownloadRounded';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
-import { api, ApiError, type SimpleLogLine } from '../../api/client';
+import { api, ApiError, type SimpleLogLine, type SimpleRun } from '../../api/client';
 import { PageError, PageLoading } from '../../components/Feedback';
 import { PageHeader } from '../../components/PageHeader';
 import { useAsync } from '../../hooks/useAsync';
@@ -79,6 +79,53 @@ export async function collectStoredLogs(
     if (!response.hasMore || !response.items.length) return { lines, cursor, truncated: false };
   }
   return { lines, cursor, truncated: true };
+}
+
+// One package of the upload this run belongs to, the run being viewed
+// included.
+export interface UploadPackage {
+  id: string;
+  filename: string;
+  status: string;
+  batchLast: boolean;
+  createdAt: string;
+  current: boolean;
+}
+
+// uploadPackages puts the run being viewed back among the other packages of the
+// same upload, in the order they were deployed. The stages an administrator set
+// to run once per upload act on all of them together, so a run whose stages
+// were held is only explained by the package that did not deploy — and until
+// now finding it meant picking it out of the run history by eye. An upload of
+// one package has nothing to relate, so it lists nothing.
+export function uploadPackages(run: SimpleRun): UploadPackage[] {
+  const siblings = run.batchSiblings ?? [];
+  if (!siblings.length) return [];
+  const packages: UploadPackage[] = siblings.map((item) => ({ ...item, current: false }));
+  packages.push({
+    id: run.id,
+    filename: run.filename,
+    status: run.status,
+    batchLast: run.batchLast ?? false,
+    createdAt: run.createdAt,
+    current: true,
+  });
+  // The upload is sequential, so the deploy order is the creation order. The id
+  // only settles the tie two runs stored in the same instant would otherwise
+  // leave to the sort's own discretion.
+  return packages.sort((left, right) =>
+    left.createdAt === right.createdAt
+      ? left.id.localeCompare(right.id)
+      : left.createdAt < right.createdAt ? -1 : 1,
+  );
+}
+
+// undeployedPackages counts the packages of the upload that finished without
+// deploying. One that is still queued or running has not failed, so it is not
+// counted: the number is there to say how much of the upload is missing, not
+// how much of it is unfinished.
+export function undeployedPackages(packages: UploadPackage[]): number {
+  return packages.filter((item) => item.status === 'FAILED' || item.status === 'TIMEOUT').length;
 }
 
 function Detail({ label, value }: { label: string; value: React.ReactNode }) {
@@ -164,6 +211,8 @@ export function SimpleRunDetailPage() {
   if (!run.data) return null;
 
   const detail = run.data;
+  const packages = uploadPackages(detail);
+  const undeployed = undeployedPackages(packages);
   const duration =
     detail.startedAt && detail.finishedAt
       ? formatDuration(new Date(detail.finishedAt).getTime() - new Date(detail.startedAt).getTime())
@@ -255,6 +304,59 @@ export function SimpleRunDetailPage() {
             </Box>
           </CardContent>
         </Card>
+
+        {(packages.length > 0 || Boolean(detail.batchSiblingsError)) && (
+          <Card>
+            <CardContent>
+              <Typography variant="subtitle1" sx={{ mb: 0.5 }}>
+                같은 업로드의 패키지
+                {packages.length > 0 && (
+                  <Typography component="span" variant="body2" color="text.secondary"> · {packages.length}개</Typography>
+                )}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                {undeployed > 0
+                  ? `${undeployed}개가 배포되지 않았습니다. 업로드당 한 번 실행하는 단계(복제·앱 배포)는 모든 패키지가 배포돼야 실행됩니다.`
+                  : '한 번에 올린 패키지들입니다. 업로드당 한 번 실행하는 단계는 마지막 패키지에서 실행됩니다.'}
+              </Typography>
+              {Boolean(detail.batchSiblingsError) && (
+                <Alert severity="warning" sx={{ mb: 1.5 }}>{detail.batchSiblingsError}</Alert>
+              )}
+              <Divider sx={{ mb: 1 }} />
+              <Stack divider={<Divider flexItem />}>
+                {packages.map((item) => (
+                  <Stack
+                    key={item.id}
+                    direction="row"
+                    alignItems="center"
+                    spacing={1.5}
+                    sx={{ py: 1, minWidth: 0 }}
+                  >
+                    <Chip size="small" label={item.status} color={statusColor(item.status)} sx={{ flexShrink: 0 }} />
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      {item.current ? (
+                        <Typography sx={{ wordBreak: 'break-all', fontWeight: 600 }}>{item.filename}</Typography>
+                      ) : (
+                        <Typography
+                          component={RouterLink}
+                          to={`/simple/runs/${item.id}`}
+                          sx={{ wordBreak: 'break-all', color: 'primary.main' }}
+                        >
+                          {item.filename}
+                        </Typography>
+                      )}
+                      <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                        {formatDate(item.createdAt)}
+                        {item.current ? ' · 지금 보는 실행' : ''}
+                        {item.batchLast ? ' · 마지막 패키지' : ''}
+                      </Typography>
+                    </Box>
+                  </Stack>
+                ))}
+              </Stack>
+            </CardContent>
+          </Card>
+        )}
 
         <Card>
           <CardContent>
