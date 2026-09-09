@@ -235,6 +235,17 @@ export interface SimpleLogLine {
 // to the last package of the upload (SKIPPED), or ran and has an outcome.
 export type StageStatus = 'NONE' | 'SKIPPED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
 
+// One of the other packages of the same upload. Listed on the run screen so a
+// reader who is told the upload did not go through as a whole can see which
+// package is the reason without hunting through the history.
+export interface SimpleBatchSibling {
+  id: string;
+  filename: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT';
+  batchLast: boolean;
+  createdAt: string;
+}
+
 export interface SimpleRun {
   id: string;
   targetName: string;
@@ -257,6 +268,10 @@ export interface SimpleRun {
   appDeployError?: string;
   batchId?: string;
   batchLast?: boolean;
+  batchSiblings?: SimpleBatchSibling[];
+  // Set when the other packages of the upload could not be read. The list is
+  // then empty for a reason that has nothing to do with the upload's size.
+  batchSiblingsError?: string;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
