@@ -21,7 +21,17 @@ import (
 	"github.com/hkjang/releasedock/backend/internal/localexec"
 	"github.com/hkjang/releasedock/backend/internal/secure"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
+
+// isUniqueViolation reports whether err is PostgreSQL rejecting a row that a
+// unique index already holds (SQLSTATE 23505). Anything else - a lost
+// connection, a cancelled request, a constraint of another kind - is a failure
+// the caller must not describe as a duplicate.
+func isUniqueViolation(err error) bool {
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError) && postgresError.Code == "23505"
+}
 
 // maxSimpleRunLogBytes caps what one run may append. The command keeps running
 // past the cap; only its output stops being stored.
@@ -428,8 +438,17 @@ func (s *Server) createSimpleRun(w http.ResponseWriter, r *http.Request) {
 		command.Source, command.Path, args, int(command.Timeout/time.Second),
 		batch.ID, batch.Last)
 	if err != nil {
-		// The partial unique index rejects a second in-flight run per target.
-		writeError(w, http.StatusConflict, "simple_run_active", "이 대상에서 이미 실행 중인 작업이 있습니다")
+		// The partial unique index rejects a second in-flight run per target,
+		// and that is the one rejection the uploader can act on. Anything else
+		// is this server failing, and answering it with the conflict would send
+		// the operator hunting for a run the list does not show while the real
+		// cause goes unrecorded.
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "simple_run_active", "이 대상에서 이미 실행 중인 작업이 있습니다")
+			return
+		}
+		s.log.Error("could not record a simple run", "target", target.ID, "error", err)
+		writeError(w, http.StatusInternalServerError, "database_error", "실행 기록을 저장하지 못했습니다")
 		return
 	}
 
