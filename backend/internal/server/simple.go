@@ -772,24 +772,42 @@ func newLogBudget() logBudget {
 	return logBudget{command: maxSimpleRunLogBytes, system: maxSimpleRunSystemLogBytes}
 }
 
+// emptyLineCost is what a blank line is charged. A blank line carries no bytes
+// but still takes a row, so charging it one byte keeps a command that prints
+// nothing but newlines bounded by the same cap as any other output.
+const emptyLineCost = 1
+
 // take charges size against the stream's budget and reports how much of it may
-// be stored. exhausted is true only on the payload that uses up the last of the
-// command budget, which is the one moment the reader is told that later command
-// output is dropped.
-func (b *logBudget) take(stream string, size int) (allowed int, exhausted bool) {
+// be stored. store is false only when the budget is gone and the line has to be
+// dropped whole; it is true with allowed == 0 for a blank line, which is stored
+// because a script's blank lines are how it separates sections and a log that
+// silently closes them up no longer reads like the output it recorded.
+// exhausted is true only on the payload that uses up the last of the command
+// budget, which is the one moment the reader is told that later command output
+// is dropped.
+func (b *logBudget) take(stream string, size int) (allowed int, store bool, exhausted bool) {
 	remaining := &b.command
 	if stream == streamSystem {
 		remaining = &b.system
 	}
-	if size <= 0 || *remaining <= 0 {
-		return 0, false
+	if *remaining <= 0 {
+		return 0, false, false
 	}
-	allowed = size
-	if allowed > *remaining {
-		allowed = *remaining
+	if size < 0 {
+		size = 0
 	}
-	*remaining -= allowed
-	return allowed, stream != streamSystem && *remaining == 0
+	charge := size
+	if charge == 0 {
+		charge = emptyLineCost
+	}
+	if charge > *remaining {
+		charge = *remaining
+	}
+	*remaining -= charge
+	if size > 0 {
+		allowed = charge
+	}
+	return allowed, true, stream != streamSystem && *remaining == 0
 }
 
 // simpleRunLogger appends command output line by line, sharing one byte budget
@@ -807,9 +825,13 @@ func (l *simpleRunLogger) writer(stream string) io.Writer {
 	return &simpleRunStream{logger: l, stream: stream}
 }
 
+// logCapReachedNotice tells the reader that the command kept running but its
+// output is no longer being stored.
+const logCapReachedNotice = "로그 저장 한도에 도달하여 이후 명령 출력은 기록하지 않습니다"
+
 func (l *simpleRunLogger) append(stream string, payload []byte) {
-	allowed, exhausted := l.budget.take(stream, len(payload))
-	if allowed <= 0 {
+	allowed, store, exhausted := l.budget.take(stream, len(payload))
+	if !store {
 		return
 	}
 	payload = payload[:allowed]
@@ -818,12 +840,13 @@ func (l *simpleRunLogger) append(stream string, payload []byte) {
 		l.server.log.Warn("could not append simple run log", "run", l.runID, "error", err)
 		return
 	}
-	if exhausted {
-		_, _ = l.server.store.Pool.Exec(l.ctx,
-			`INSERT INTO simple_run_logs(run_id,stream,payload) VALUES($1,'system',$2)`,
-			l.runID, []byte("로그 저장 한도에 도달하여 이후 명령 출력은 기록하지 않습니다"))
-	}
 	_, _ = l.server.store.Pool.Exec(l.ctx, `UPDATE simple_runs SET log_bytes=log_bytes+$2 WHERE id=$1`, l.runID, len(payload))
+	if exhausted {
+		// Written like any other line so the notice is charged to the system
+		// reserve and counted in log_bytes. It cannot recurse: a system line
+		// never reports the command budget exhausted.
+		l.append(streamSystem, []byte(logCapReachedNotice))
+	}
 }
 
 func (l *simpleRunLogger) system(message string) {
