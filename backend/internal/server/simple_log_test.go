@@ -13,15 +13,15 @@ import (
 // replication and the application deployment ran.
 func TestLogBudgetKeepsAReserveForServerLines(t *testing.T) {
 	budget := newLogBudget()
-	allowed, exhausted := budget.take("stdout", maxSimpleRunLogBytes)
-	if allowed != maxSimpleRunLogBytes || !exhausted {
-		t.Fatalf("the command must be able to use its whole budget, got %d exhausted=%v", allowed, exhausted)
+	allowed, store, exhausted := budget.take("stdout", maxSimpleRunLogBytes)
+	if allowed != maxSimpleRunLogBytes || !store || !exhausted {
+		t.Fatalf("the command must be able to use its whole budget, got %d store=%v exhausted=%v", allowed, store, exhausted)
 	}
-	if allowed, _ := budget.take("stderr", 16); allowed != 0 {
-		t.Fatalf("command output past the cap must be dropped, got %d", allowed)
+	if allowed, store, _ := budget.take("stderr", 16); allowed != 0 || store {
+		t.Fatalf("command output past the cap must be dropped, got %d store=%v", allowed, store)
 	}
-	if allowed, _ := budget.take(streamSystem, 64); allowed != 64 {
-		t.Fatalf("a server line must still be stored after the command filled the cap, got %d", allowed)
+	if allowed, store, _ := budget.take(streamSystem, 64); allowed != 64 || !store {
+		t.Fatalf("a server line must still be stored after the command filled the cap, got %d store=%v", allowed, store)
 	}
 }
 
@@ -30,17 +30,17 @@ func TestLogBudgetKeepsAReserveForServerLines(t *testing.T) {
 // every line it discards afterwards.
 func TestLogBudgetReportsExhaustionOnce(t *testing.T) {
 	budget := logBudget{command: 10, system: 10}
-	allowed, exhausted := budget.take("stdout", 4)
-	if allowed != 4 || exhausted {
-		t.Fatalf("a payload within the budget must not report exhaustion, got %d %v", allowed, exhausted)
+	allowed, store, exhausted := budget.take("stdout", 4)
+	if allowed != 4 || !store || exhausted {
+		t.Fatalf("a payload within the budget must not report exhaustion, got %d %v %v", allowed, store, exhausted)
 	}
 	// The payload that crosses the cap is stored up to the cap and reports it.
-	allowed, exhausted = budget.take("stdout", 9)
-	if allowed != 6 || !exhausted {
-		t.Fatalf("the crossing payload must be truncated and report exhaustion, got %d %v", allowed, exhausted)
+	allowed, store, exhausted = budget.take("stdout", 9)
+	if allowed != 6 || !store || !exhausted {
+		t.Fatalf("the crossing payload must be truncated and report exhaustion, got %d %v %v", allowed, store, exhausted)
 	}
-	if allowed, exhausted = budget.take("stdout", 3); allowed != 0 || exhausted {
-		t.Fatalf("later output must be dropped silently, got %d %v", allowed, exhausted)
+	if allowed, store, exhausted = budget.take("stdout", 3); allowed != 0 || store || exhausted {
+		t.Fatalf("later output must be dropped silently, got %d %v %v", allowed, store, exhausted)
 	}
 }
 
@@ -49,27 +49,56 @@ func TestLogBudgetReportsExhaustionOnce(t *testing.T) {
 // was reached.
 func TestLogBudgetBoundsTheReserveWithoutReportingExhaustion(t *testing.T) {
 	budget := logBudget{command: 10, system: 5}
-	allowed, exhausted := budget.take(streamSystem, 12)
-	if allowed != 5 || exhausted {
-		t.Fatalf("a server line must be truncated to the reserve, got %d %v", allowed, exhausted)
+	allowed, store, exhausted := budget.take(streamSystem, 12)
+	if allowed != 5 || !store || exhausted {
+		t.Fatalf("a server line must be truncated to the reserve, got %d %v %v", allowed, store, exhausted)
 	}
-	if allowed, _ := budget.take(streamSystem, 1); allowed != 0 {
-		t.Fatalf("the reserve must not be exceeded, got %d", allowed)
+	if allowed, store, _ := budget.take(streamSystem, 1); allowed != 0 || store {
+		t.Fatalf("the reserve must not be exceeded, got %d %v", allowed, store)
 	}
-	if allowed, _ := budget.take("stdout", 10); allowed != 10 {
+	if allowed, store, _ := budget.take("stdout", 10); allowed != 10 || !store {
 		t.Fatal("a full reserve must not consume the command budget")
 	}
 }
 
-// An empty payload is not a log row, and must not be mistaken for the one that
-// exhausts the budget.
-func TestLogBudgetIgnoresEmptyPayloads(t *testing.T) {
+// A blank line is output: deployment scripts use them to separate the sections
+// an operator reads the log by, so one has to survive as a row of its own
+// rather than be closed up against the line before it.
+func TestLogBudgetStoresBlankLines(t *testing.T) {
+	budget := logBudget{command: 10, system: 4}
+	allowed, store, exhausted := budget.take("stdout", 0)
+	if allowed != 0 || !store || exhausted {
+		t.Fatalf("a blank line must be stored, got %d %v %v", allowed, store, exhausted)
+	}
+	if budget.command != 9 {
+		t.Fatalf("a blank line must be charged, command = %d", budget.command)
+	}
+}
+
+// Charging blank lines is what bounds them: a command that prints nothing but
+// newlines runs into the same cap as one that prints text, instead of adding
+// rows for as long as it runs.
+func TestLogBudgetBoundsBlankLines(t *testing.T) {
+	budget := logBudget{command: 2, system: 4}
+	for range 2 {
+		if _, store, _ := budget.take("stdout", 0); !store {
+			t.Fatal("a blank line within the budget must be stored")
+		}
+	}
+	if _, store, _ := budget.take("stdout", 0); store {
+		t.Fatal("blank lines past the cap must be dropped like any other output")
+	}
+}
+
+// Nothing is stored once the budget is gone, blank line or not, and reaching
+// that point is reported only once.
+func TestLogBudgetDropsEverythingOnceExhausted(t *testing.T) {
 	budget := logBudget{command: 0, system: 4}
-	if allowed, exhausted := budget.take("stdout", 0); allowed != 0 || exhausted {
-		t.Fatalf("an empty payload must be a no-op, got %d %v", allowed, exhausted)
+	if allowed, store, exhausted := budget.take("stdout", 0); allowed != 0 || store || exhausted {
+		t.Fatalf("an exhausted budget must store nothing, got %d %v %v", allowed, store, exhausted)
 	}
 	if budget.system != 4 {
-		t.Fatalf("an empty payload must not charge a budget, system = %d", budget.system)
+		t.Fatalf("a dropped command line must not charge the reserve, system = %d", budget.system)
 	}
 }
 

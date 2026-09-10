@@ -50,6 +50,12 @@ export const MAX_LOG_PAGES = 50;
 export const LOG_TRUNCATED_NOTICE =
   '[releasedock] 화면에 담을 수 있는 줄 수를 넘어 여기까지만 표시했습니다. 전체 로그는 내려받기를 사용하십시오.';
 
+// LOG_LINE_HEIGHT is shared by the log block and the rows inside it. A line the
+// command left blank has nothing to give it height, so it is held open to this
+// instead - blank lines are how a script separates its steps, and dropping them
+// on screen would run those steps together for the reader.
+export const LOG_LINE_HEIGHT = 1.6;
+
 export type LogPage = { items: SimpleLogLine[]; lastId: number; hasMore: boolean };
 
 // nextLogCursor leaves the cursor alone when a page came back empty. The last
@@ -393,7 +399,7 @@ export function SimpleRunDetailPage() {
                   borderRadius: 1,
                   bgcolor: 'background.default',
                   fontSize: 13,
-                  lineHeight: 1.6,
+                  lineHeight: LOG_LINE_HEIGHT,
                   whiteSpace: 'pre-wrap',
                   wordBreak: 'break-all',
                 }}
@@ -403,7 +409,11 @@ export function SimpleRunDetailPage() {
                     <Box
                       key={line.id}
                       component="span"
-                      sx={{ display: 'block', color: line.stream === 'stderr' ? 'error.light' : line.stream === 'system' ? 'text.secondary' : 'inherit' }}
+                      sx={{
+                        display: 'block',
+                        minHeight: `${LOG_LINE_HEIGHT}em`,
+                        color: line.stream === 'stderr' ? 'error.light' : line.stream === 'system' ? 'text.secondary' : 'inherit',
+                      }}
                     >
                       {line.message}
                     </Box>
