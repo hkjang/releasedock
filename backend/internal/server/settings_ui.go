@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -174,6 +175,37 @@ func settingInt(values map[string]any, key string, fallback int) (int, error) {
 		return 0, errors.New(key + " must be an integer")
 	}
 	return int(number), nil
+}
+
+// settingFields reads a whitespace/comma-separated list, given either as one
+// string or as an array. An absent key keeps the stored value.
+func settingFields(values map[string]any, key string, fallback []string) ([]string, error) {
+	raw, ok := values[key]
+	if !ok || raw == nil {
+		return fallback, nil
+	}
+	var items []string
+	switch value := raw.(type) {
+	case string:
+		items = strings.FieldsFunc(value, func(r rune) bool { return r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == ',' })
+	case []any:
+		for _, item := range value {
+			text, ok := item.(string)
+			if !ok {
+				return nil, errors.New(key + " must contain only strings")
+			}
+			items = append(items, strings.TrimSpace(text))
+		}
+	default:
+		return nil, errors.New(key + " must be a string or a string array")
+	}
+	normalized := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != "" && !slices.Contains(normalized, item) {
+			normalized = append(normalized, item)
+		}
+	}
+	return normalized, nil
 }
 
 func settingStrings(values map[string]any, key string) ([]string, error) {
@@ -433,9 +465,43 @@ func (s *Server) putOIDCSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// MCP over SSO shares the issuer above; everything below is checked before
+	// anything is written, so a refused save leaves the previous values whole.
+	mcpOAuth := oidcSettings{
+		MCPOAuthEnabled:        settingBool(values, "mcp.oauth.enabled", current.MCPOAuthEnabled),
+		MCPOAuthResource:       settingString(values, "mcp.oauth.resource"),
+		Issuer:                 issuer,
+		AllowInsecureEndpoints: allowInsecure,
+	}
+	if _, present := values["mcp.oauth.resource"]; !present {
+		mcpOAuth.MCPOAuthResource = current.MCPOAuthResource
+	}
+	if mcpOAuth.MCPOAuthAudience, err = settingFields(values, "mcp.oauth.audience", current.MCPOAuthAudience); err != nil {
+		writeError(w, 400, "invalid_oidc_settings", err.Error())
+		return
+	}
+	if mcpOAuth.MCPOAuthScopes, err = settingFields(values, "mcp.oauth.scopes", current.MCPOAuthScopes); err != nil {
+		writeError(w, 400, "invalid_oidc_settings", err.Error())
+		return
+	}
+	if err = s.validateMCPOAuthSettings(r.Context(), tx, mcpOAuth); err != nil {
+		writeError(w, 400, "invalid_mcp_oauth_settings", err.Error())
+		return
+	}
+	if mcpOAuth.MCPOAuthEnabled && !enabled {
+		// Web sign-in off but MCP SSO on is legitimate (accounts created by an
+		// administrator); the issuer still has to be reachable to be useful.
+		ctx, cancel := contextWithTimeout(r, 10*time.Second)
+		_, err = s.discoverOIDC(ctx, issuer, allowInsecure)
+		cancel()
+		if err != nil {
+			writeError(w, 400, "oidc_discovery_failed", err.Error())
+			return
+		}
+	}
 	delete(values, "clientSecret")
 	encoded, _ := json.Marshal(values)
-	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,auto_login=$9,default_role_id=$10,config=$11,updated_by=$12,updated_at=now() WHERE id='default'`, enabled, issuer, clientID, secretEnc, redirectURL, scopes, autoCreate, allowInsecure, autoLogin, roleID, encoded, p.UserID)
+	_, err = tx.Exec(r.Context(), `UPDATE oidc_settings SET enabled=$1,issuer=$2,client_id=$3,client_secret_enc=$4,redirect_url=$5,scopes=$6,auto_create_user=$7,allow_insecure_endpoints=$8,auto_login=$9,default_role_id=$10,config=$11,mcp_oauth_enabled=$13,mcp_oauth_resource=$14,mcp_oauth_audience=$15,mcp_oauth_scopes=$16,updated_by=$12,updated_at=now() WHERE id='default'`, enabled, issuer, clientID, secretEnc, redirectURL, scopes, autoCreate, allowInsecure, autoLogin, roleID, encoded, p.UserID, mcpOAuth.MCPOAuthEnabled, mcpOAuth.MCPOAuthResource, mcpOAuth.MCPOAuthAudience, mcpOAuth.MCPOAuthScopes)
 	if err == nil {
 		err = tx.Commit(r.Context())
 	}

@@ -49,7 +49,10 @@ const metadata: Record<SettingSection, { title: string; description: string; ico
 
 const initialValues: Record<SettingSection, SettingValue> = {
   general: { serviceName: 'ReleaseDock', artifactMaxSizeGb: 20, publicUrl: '', secureCookies: false, allowedOrigins: [] },
-  oidc: { enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: '', scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true, allowInsecureEndpoints: false, autoLogin: false },
+  oidc: {
+    enabled: false, issuerUrl: '', clientId: '', clientSecret: '', redirectUrl: '', scopes: 'openid profile email', defaultRole: 'viewer', autoProvision: true, allowInsecureEndpoints: false, autoLogin: false,
+    'mcp.oauth.enabled': false, 'mcp.oauth.resource': '', 'mcp.oauth.audience': '', 'mcp.oauth.scopes': 'mcp.use applications.read profiles.read releases.read',
+  },
   ai: { enabled: false, baseUrl: '', apiKey: '', model: '', streamingDefault: true, maxTokens: 32768 },
   approval: { enabled: false, protectedEnvironments: '', allowSelfApproval: false, requireRejectComment: true },
   storage: { driver: 'local', localPath: '/var/lib/releasedock/artifacts' },
@@ -170,6 +173,67 @@ function OidcFields({ values, set, disabled }: FieldsProps) {
         </TextField>
         <FormControlLabel control={<Checkbox checked={Boolean(values.autoProvision)} onChange={(e) => set('autoProvision', e.target.checked)} disabled={disabled || !enabled} />} label="첫 로그인 시 사용자 자동 생성" />
       </Stack>
+      <Divider />
+      <McpOauthFields values={values} set={set} disabled={disabled} />
+    </Stack>
+  );
+}
+
+// MCP over SSO: /mcp accepts a Keycloak access token in addition to a
+// personal key. The server is only the resource server — the switch, the
+// identifier it claims, and who it accepts tokens for. Keys are untouched.
+function McpOauthFields({ values, set, disabled }: FieldsProps) {
+  const mcpEnabled = Boolean(values['mcp.oauth.enabled']);
+  const active = Boolean(values.mcpOauthActive);
+  const mcpUrl = String(values.mcpOauthEffectiveResource || `${window.location.origin}/mcp`);
+  const metadataUrl = String(values.mcpOauthMetadataUrl || '');
+  return (
+    <Stack spacing={2.25}>
+      <Typography variant="subtitle1" fontWeight={700}>MCP를 SSO로 연결 (키 없이)</Typography>
+      <Typography variant="body2" color="text.secondary">
+        켜면 MCP 클라이언트(Claude, Cursor 등)에 MCP 주소 하나만 주면 됩니다. 클라이언트가 Keycloak 로그인을 띄우고 받은 액세스 토큰으로 <code>/mcp</code>에 들어옵니다.
+        개인 API 키는 그대로 동작하며, SSO 토큰은 <code>/mcp</code>에서만 받습니다. 계정은 만들지 않으므로 사용자는 먼저 웹으로 한 번 로그인해 두어야 합니다.
+      </Typography>
+      <FormControlLabel control={<Switch disabled={disabled} checked={mcpEnabled} onChange={(e) => set('mcp.oauth.enabled', e.target.checked)} />} label="MCP SSO(OAuth) 인증 활성화" />
+      {mcpEnabled && (
+        <Alert severity={active ? 'success' : 'warning'}>
+          {active
+            ? <>활성화되어 있습니다. 클라이언트는 아래 메타데이터 주소에서 Keycloak issuer를 읽습니다.</>
+            : <>켜져 있지만 아직 동작하지 않습니다: {String(values.mcpOauthInactiveReason || 'Issuer URL과 리소스 식별자가 필요합니다.')}</>}
+        </Alert>
+      )}
+      <TextField
+        label="리소스 식별자 (mcp.oauth.resource, 선택)"
+        disabled={disabled || !mcpEnabled}
+        value={String(values['mcp.oauth.resource'] ?? '')}
+        onChange={(e) => set('mcp.oauth.resource', e.target.value)}
+        placeholder={mcpUrl}
+        helperText="클라이언트가 실제로 접속하는 공개 HTTPS 주소 + /mcp. 비워 두면 일반 설정의 공개 URL에서 파생합니다. Keycloak Audience 매퍼에 넣는 값이기도 합니다."
+        fullWidth
+      />
+      <TextField
+        label="허용 대상 (mcp.oauth.audience)"
+        disabled={disabled || !mcpEnabled}
+        value={String(values['mcp.oauth.audience'] ?? '')}
+        onChange={(e) => set('mcp.oauth.audience', e.target.value)}
+        placeholder="releasedock-mcp"
+        helperText="공백 구분. 토큰의 aud 또는 azp 가 이 목록에 있으면 받습니다. Keycloak 26은 클라이언트 ID를 azp 에 담으므로, Audience 매퍼 없이 쓰려면 MCP 클라이언트 ID를 여기 적으십시오."
+        fullWidth
+      />
+      <TextField
+        label="SSO 주체에게 주는 권한 (mcp.oauth.scopes)"
+        disabled={disabled || !mcpEnabled}
+        value={String(values['mcp.oauth.scopes'] ?? '')}
+        onChange={(e) => set('mcp.oauth.scopes', e.target.value)}
+        helperText="공백 구분 권한 코드. SSO 토큰으로 들어온 사용자는 자기 역할 권한 중 이 목록 안의 것만 씁니다(개인 키의 권한 범위와 같은 규칙). mcp.use 는 반드시 포함해야 합니다."
+        fullWidth
+      />
+      {active && (
+        <Stack spacing={2}>
+          <TextField label="MCP 주소 (클라이언트에 줄 값)" value={mcpUrl} fullWidth slotProps={{ input: { readOnly: true } }} />
+          <TextField label="보호 리소스 메타데이터 주소" value={metadataUrl} fullWidth slotProps={{ input: { readOnly: true } }} helperText="curl 로 열어 보면 authorization_servers 에 Keycloak issuer 가 있어야 합니다. 리버스 프록시가 이 경로도 전달해야 합니다." />
+        </Stack>
+      )}
     </Stack>
   );
 }

@@ -365,7 +365,7 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "entropy_error", "could not generate API key")
 		return
 	}
-	token := "rdk_" + random
+	token := store.APIKeyPrefix + random
 	prefix := token[:12]
 	_, err = s.store.Pool.Exec(r.Context(), `INSERT INTO api_keys(id,user_id,name,prefix,secret_hash,scopes,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7)`, id, p.UserID, strings.TrimSpace(input.Name), prefix, secure.TokenHash(token), input.Scopes, expiresAt)
 	if err != nil {
@@ -384,7 +384,7 @@ func (s *Server) rotateAPIKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "entropy_error", "could not rotate API key")
 		return
 	}
-	token := "rdk_" + random
+	token := store.APIKeyPrefix + random
 	prefix := token[:12]
 	tag, err := s.store.Pool.Exec(r.Context(), `UPDATE api_keys SET prefix=$3,secret_hash=$4,last_used_at=NULL,updated_at=now() WHERE id=$1 AND user_id=$2 AND revoked_at IS NULL`, id, p.UserID, prefix, secure.TokenHash(token))
 	if err != nil {

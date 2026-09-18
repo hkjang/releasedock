@@ -135,6 +135,8 @@ export interface AuthConfig {
     issuer?: string;
     /** Try a prompt=none sign-in before showing the login screen. */
     autoLogin?: boolean;
+    /** /mcp accepts Keycloak access tokens, so a client needs no personal key. */
+    mcpOAuth?: boolean;
   };
 }
 
@@ -394,6 +396,11 @@ function serializeSettings(section: SettingSection, value: SettingValue): Settin
       allowInsecureEndpoints: Boolean(value.allowInsecureEndpoints),
       autoLogin: Boolean(value.autoLogin),
       verifyTls: true,
+      // MCP over SSO; the keys are the fleet-wide setting names.
+      'mcp.oauth.enabled': Boolean(value['mcp.oauth.enabled']),
+      'mcp.oauth.resource': String(value['mcp.oauth.resource'] ?? ''),
+      'mcp.oauth.audience': String(value['mcp.oauth.audience'] ?? ''),
+      'mcp.oauth.scopes': String(value['mcp.oauth.scopes'] ?? ''),
     };
     if (value.clientSecret) result.clientSecret = value.clientSecret;
     return result;

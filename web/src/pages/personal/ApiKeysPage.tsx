@@ -94,6 +94,10 @@ function ApiKeyDialog({ item, permissionOptions, open, onClose, onSaved, onSecre
 export function ApiKeysPage() {
   const { user } = useAuth();
   const state = useAsync(api.apiKeys, []);
+  // Whether /mcp also takes a Keycloak token: then an MCP client needs only
+  // the URL, and the page should say so before the person makes a key.
+  const authConfig = useAsync(api.authConfig, []);
+  const mcpSso = Boolean(authConfig.data?.oidc.mcpOAuth);
   const [editing, setEditing] = useState<ApiKey | null>();
   const [confirm, setConfirm] = useState<{ type: 'rotate' | 'revoke'; key: ApiKey }>();
   const [busy, setBusy] = useState(false);
@@ -123,6 +127,12 @@ export function ApiKeysPage() {
     <>
       <PageHeader title="내 API 키" description="REST API와 MCP에 사용할 개인 키를 생성하고, 권한을 변경하거나 주기적으로 회전합니다." action={<Button variant="contained" startIcon={<AddRoundedIcon />} disabled={!permissionOptions.length} onClick={() => setEditing(null)}>새 API 키</Button>} />
       <Alert severity="warning" sx={{ mb: 2.5 }}>API 키는 비밀번호와 같습니다. 서비스별로 키를 분리하고, 유출이 의심되면 즉시 회전하거나 폐기하세요.</Alert>
+      {mcpSso && (
+        <Alert severity="info" sx={{ mb: 2.5 }}>
+          <strong>키 없이 SSO로 MCP 연결:</strong> MCP 클라이언트(Claude, Cursor 등)에 <code>{`${window.location.origin}/mcp`}</code> 주소만 넣으면 Keycloak 로그인 창이 뜨고, 로그인하면 바로 연결됩니다.
+          권한은 관리자가 정한 범위 안에서 내 역할 권한을 따릅니다. 키는 사람이 없는 자동화(CI, 스크립트)에 계속 쓰면 됩니다.
+        </Alert>
+      )}
       {!permissionOptions.length && <Alert severity="info" sx={{ mb: 2.5 }}>현재 계정에 API 키로 위임할 수 있는 권한이 없습니다.</Alert>}
       <Card>
         {state.loading && <Box sx={{ p: 3 }}><PageLoading /></Box>}

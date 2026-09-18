@@ -56,6 +56,8 @@ type Server struct {
 	networkMu     sync.Mutex
 	networkCache  *networkSettings
 	networkExpiry time.Time
+	// Keycloak signing keys for MCP-over-SSO tokens; see mcpoauth.go.
+	mcpOAuthKeys mcpOAuthKeyCache
 }
 
 // New accepts a disk web root for tests and for an explicit operator
@@ -299,6 +301,10 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /mcp", s.withPermission("mcp.use", s.mcpGET))
 	mux.HandleFunc("POST /mcp", s.withPermission("mcp.use", s.mcpPOST))
+	// RFC 9728: where an MCP client refused with 401 learns which
+	// authorization server to sign in with. Unauthenticated by design.
+	mux.HandleFunc("GET "+mcpProtectedResourcePath, s.protectedResourceMetadata)
+	mux.HandleFunc("GET "+mcpProtectedResourcePath+mcpPath, s.protectedResourceMetadata)
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "API route not found")
 	})
@@ -323,9 +329,32 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 		var p store.Principal
 		var err error
 		auth := strings.TrimSpace(r.Header.Get("Authorization"))
+		mcp := isMCPRequest(r)
+		hadBearer := false
 		if strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+			hadBearer = true
 			bearer := strings.TrimSpace(auth[7:])
-			p, err = s.store.AuthenticateAPIKey(r.Context(), bearer)
+			if mcp && !strings.HasPrefix(bearer, store.APIKeyPrefix) && looksLikeJWT(bearer) {
+				// Not a personal key. On the MCP path the other thing a bearer
+				// can be is an access token from the SSO server, which MCP
+				// clients obtain through OAuth — see mcpoauth.go, which also
+				// says why when it refuses. Everywhere else a token is just
+				// not a key.
+				var refusal *mcpOAuthRefusal
+				p, refusal = s.oauthPrincipal(r.Context(), r, bearer)
+				if refusal != nil {
+					// The client gets what to do; the operator gets which
+					// check failed, which the message deliberately omits.
+					s.log.Warn("MCP OAuth token rejected", "reason", refusal.reason, "ip", remoteIP(r))
+					if refusal.status == http.StatusUnauthorized {
+						s.mcpChallenge(w, r, true)
+					}
+					writeError(w, refusal.status, refusal.code, refusal.message)
+					return
+				}
+			} else {
+				p, err = s.store.AuthenticateAPIKey(r.Context(), bearer)
+			}
 		} else if cookie, cookieErr := r.Cookie("releasedock_session"); cookieErr == nil {
 			p, err = s.store.AuthenticateSession(r.Context(), cookie.Value)
 			if err == nil && isUnsafeMethod(r.Method) {
@@ -339,6 +368,9 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 			err = errors.New("credentials not provided")
 		}
 		if err != nil {
+			if mcp {
+				s.mcpChallenge(w, r, hadBearer)
+			}
 			writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required")
 			return
 		}

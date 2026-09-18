@@ -40,6 +40,13 @@ type oidcSettings struct {
 	// is still valid, using prompt=none.
 	AutoLogin     bool
 	DefaultRoleID *string
+	// MCPOAuth* let /mcp accept a Keycloak access token in addition to a
+	// personal key; see mcpoauth.go. The issuer and client are shared with
+	// the web sign-in above.
+	MCPOAuthEnabled  bool
+	MCPOAuthResource string
+	MCPOAuthAudience []string
+	MCPOAuthScopes   []string
 }
 
 type oidcDiscovery struct {
@@ -56,12 +63,12 @@ func (s *Server) loadOIDC(ctx context.Context) (oidcSettings, error) {
 
 func loadOIDCWithQueryer(ctx context.Context, queryer dependencyQueryer, forUpdate bool) (oidcSettings, error) {
 	var cfg oidcSettings
-	query := `SELECT enabled,issuer,client_id,client_secret_enc,redirect_url,scopes,auto_create_user,allow_insecure_endpoints,auto_login,default_role_id FROM oidc_settings WHERE id='default'`
+	query := `SELECT enabled,issuer,client_id,client_secret_enc,redirect_url,scopes,auto_create_user,allow_insecure_endpoints,auto_login,default_role_id,mcp_oauth_enabled,mcp_oauth_resource,mcp_oauth_audience,mcp_oauth_scopes FROM oidc_settings WHERE id='default'`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
 	err := queryer.QueryRow(ctx, query).
-		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.AllowInsecureEndpoints, &cfg.AutoLogin, &cfg.DefaultRoleID)
+		Scan(&cfg.Enabled, &cfg.Issuer, &cfg.ClientID, &cfg.ClientSecretEnc, &cfg.RedirectURL, &cfg.Scopes, &cfg.AutoCreateUser, &cfg.AllowInsecureEndpoints, &cfg.AutoLogin, &cfg.DefaultRoleID, &cfg.MCPOAuthEnabled, &cfg.MCPOAuthResource, &cfg.MCPOAuthAudience, &cfg.MCPOAuthScopes)
 	return cfg, err
 }
 
@@ -151,8 +158,11 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// autoLogin is published so the browser knows whether to attempt a silent
 	// sign-in before rendering the login screen.
+	// mcpOAuth tells the personal-key page it may offer "connect with SSO,
+	// no key needed"; it reveals nothing the metadata document does not.
 	writeJSON(w, http.StatusOK, map[string]any{"local_enabled": true, "oidc": map[string]any{
 		"enabled": cfg.Enabled, "issuer": cfg.Issuer, "autoLogin": cfg.Enabled && cfg.AutoLogin,
+		"mcpOAuth": s.mcpOAuthConfigFrom(r.Context(), r, cfg).Active,
 	}})
 }
 

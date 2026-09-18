@@ -82,6 +82,8 @@ ai-portal-v2.4.2-rc1.tar.gz
 
 폐쇄망 Keycloak이 TLS 없이 운영되거나 backchannel(`token_endpoint`, `jwks_uri`)을 평문 HTTP로 내려주는 경우 `내부 평문 HTTP endpoint 허용`을 켜면 연동됩니다. 이 옵션을 켜도 공개 라우팅 가능한 호스트에는 평문을 허용하지 않습니다. discovery 오류 메시지는 문제가 된 endpoint 이름과 실제 값, 이유를 함께 알려줍니다.
 
+같은 카드의 `MCP를 SSO로 연결` 을 켜면 `/mcp` 가 개인 API 키에 더해 Keycloak 액세스 토큰(OAuth 2.1, RFC 9728)도 받습니다. MCP 클라이언트에 주소 하나만 주면 스스로 로그인해 연결하며, 계정은 만들지 않고 권한은 관리자가 정한 범위 안에서 사용자의 역할 권한을 따릅니다. 기본값은 꺼짐이고 토큰은 `/mcp` 에서만 받습니다. 설정 표·Keycloak 클라이언트/Audience 매퍼 설정·curl 확인·거부 메시지별 조치는 [MCP 연결 가이드](docs/MCP.md)에 있습니다.
+
 ## 관리자 접근 IP 제한
 
 관리 화면에서 관리 기능을 사용할 수 있는 출발지 IP 허용 목록을 관리합니다. `/api/v1/admin/` 이하의 모든 관리 API에 적용되며, 자기 자신을 잠그는 저장은 거부되고 루프백은 항상 허용됩니다. 리버스 프록시 뒤에서 운영한다면 신뢰 프록시 CIDR을 함께 등록해야 합니다.
@@ -140,4 +142,4 @@ make package
 - MCP Origin 검증, 인증 및 권한 검사
 - AI endpoint는 관리자 allowlist 설정만 사용하며 streaming을 기본값으로 사용
 
-자세한 내용은 [아키텍처](docs/architecture.md), [심플 모드 가이드](docs/simple-mode.md), [Quick Deploy 운영 가이드](docs/quick-deploy.md)와 [폐쇄망 운영 가이드](docs/offline-install.md)를 참고하십시오.
+자세한 내용은 [아키텍처](docs/architecture.md), [심플 모드 가이드](docs/simple-mode.md), [Quick Deploy 운영 가이드](docs/quick-deploy.md), [MCP 연결 가이드](docs/MCP.md)와 [폐쇄망 운영 가이드](docs/offline-install.md)를 참고하십시오.

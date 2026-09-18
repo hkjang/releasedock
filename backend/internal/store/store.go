@@ -222,8 +222,11 @@ func (s *Store) AuthenticateSession(ctx context.Context, token string) (Principa
 	return p, nil
 }
 
+// APIKeyPrefix marks a personal key; a bearer without it is not a key.
+const APIKeyPrefix = "rdk_"
+
 func (s *Store) AuthenticateAPIKey(ctx context.Context, token string) (Principal, error) {
-	if !strings.HasPrefix(token, "rdk_") || len(token) < 24 {
+	if !strings.HasPrefix(token, APIKeyPrefix) || len(token) < 24 {
 		return Principal{}, pgx.ErrNoRows
 	}
 	hash := secure.TokenHash(token)

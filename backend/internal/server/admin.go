@@ -237,6 +237,7 @@ func (s *Server) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	// Missing or unset is not an error here; it simply means the redirect URI
 	// falls back to the incoming request.
 	publicURL, _ := s.configuredPublicOrigin(r.Context())
+	mcpOAuth := s.mcpOAuthConfigFrom(r.Context(), r, cfg)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": cfg.Enabled, "issuerUrl": cfg.Issuer, "clientId": cfg.ClientID,
 		"secretConfigured": cfg.ClientSecretEnc != "", "redirectUrl": cfg.RedirectURL,
@@ -250,6 +251,18 @@ func (s *Server) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 		"effectiveRedirectUri": s.resolveOIDCRedirectURI(r.Context(), r, cfg),
 		"scopes":               strings.Join(cfg.Scopes, " "), "autoProvision": cfg.AutoCreateUser, "defaultRoleId": cfg.DefaultRoleID,
 		"verifyTls": true, "usernameClaim": "preferred_username", "groupsClaim": "groups",
+		// MCP over SSO (mcpoauth.go). The setting keys are the ones every
+		// service in the fleet uses, so an operator learns them once.
+		"mcp.oauth.enabled":  cfg.MCPOAuthEnabled,
+		"mcp.oauth.resource": cfg.MCPOAuthResource,
+		"mcp.oauth.audience": strings.Join(cfg.MCPOAuthAudience, " "),
+		"mcp.oauth.scopes":   strings.Join(cfg.MCPOAuthScopes, " "),
+		// Read-only context: what the server actually advertises, and whether
+		// the switch is doing anything.
+		"mcpOauthActive":            mcpOAuth.Active,
+		"mcpOauthInactiveReason":    mcpOAuth.InactiveWhy,
+		"mcpOauthEffectiveResource": mcpOAuth.Resource,
+		"mcpOauthMetadataUrl":       mcpOAuth.metadataURL(),
 	})
 }
 
