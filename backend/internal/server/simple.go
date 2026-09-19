@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/hkjang/releasedock/backend/internal/localexec"
 	"github.com/hkjang/releasedock/backend/internal/secure"
@@ -834,7 +835,7 @@ func (l *simpleRunLogger) append(stream string, payload []byte) {
 	if !store {
 		return
 	}
-	payload = payload[:allowed]
+	payload = trimToRuneBoundary(payload, allowed)
 	if _, err := l.server.store.Pool.Exec(l.ctx,
 		`INSERT INTO simple_run_logs(run_id,stream,payload) VALUES($1,$2,$3)`, l.runID, stream, payload); err != nil {
 		l.server.log.Warn("could not append simple run log", "run", l.runID, "error", err)
@@ -847,6 +848,25 @@ func (l *simpleRunLogger) append(stream string, payload []byte) {
 		// never reports the command budget exhausted.
 		l.append(streamSystem, []byte(logCapReachedNotice))
 	}
+}
+
+// trimToRuneBoundary cuts payload to at most allowed bytes without splitting a
+// UTF-8 character: when the cut would land inside one, it moves back to where
+// that character starts. The stored bytes are shown as they are by the live
+// stream, the log page and the download, and a fragment of a character reads
+// as U+FFFD in all three. The budget was already charged for allowed bytes; the
+// one to three bytes given up here are simply not stored, which is why
+// log_bytes counts the payload after the cut. Output is not guaranteed to be
+// UTF-8, so the walk back is bounded by the length of one character rather
+// than by finding a character start.
+func trimToRuneBoundary(payload []byte, allowed int) []byte {
+	if allowed >= len(payload) {
+		return payload
+	}
+	for step := 0; step < utf8.UTFMax-1 && allowed > 0 && !utf8.RuneStart(payload[allowed]); step++ {
+		allowed--
+	}
+	return payload[:allowed]
 }
 
 func (l *simpleRunLogger) system(message string) {
