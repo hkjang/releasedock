@@ -102,6 +102,56 @@ func TestLogBudgetDropsEverythingOnceExhausted(t *testing.T) {
 	}
 }
 
+// The byte where the budget runs out can fall inside a multi-byte character. The
+// stored line then ends before that character rather than with a fragment of
+// it: a fragment reads as U+FFFD everywhere the log is shown, and the cap is a
+// bound on bytes, not a promise to store exactly that many.
+func TestTrimToRuneBoundaryEndsOnAWholeCharacter(t *testing.T) {
+	cases := []struct {
+		allowed int
+		want    string
+	}{
+		{0, ""},
+		{3, "가"},
+		{4, "가"},
+		{5, "가"},
+		{6, "가나"},
+		{9, "가나다"},
+	}
+	for _, c := range cases {
+		got := trimToRuneBoundary([]byte("가나다"), c.allowed)
+		if string(got) != c.want {
+			t.Fatalf("trim %q to %d bytes = %q, want %q", "가나다", c.allowed, got, c.want)
+		}
+	}
+}
+
+// ASCII has no continuation bytes, so a cut in ASCII stays exactly at the
+// budget: the accounting a reader sees for such a line does not change.
+func TestTrimToRuneBoundaryKeepsAnASCIICutExact(t *testing.T) {
+	if got := trimToRuneBoundary([]byte("abcdefg"), 3); string(got) != "abc" {
+		t.Fatalf("an ASCII cut must stay at the budget, got %q", got)
+	}
+	if got := trimToRuneBoundary([]byte("abc"), 5); string(got) != "abc" {
+		t.Fatalf("a budget past the end must keep the line whole, got %q", got)
+	}
+}
+
+// Command output is not guaranteed to be UTF-8. A run of continuation bytes
+// that never reaches a rune start must not be walked back to the start of the
+// line; a character is at most four bytes, so at most three are ever dropped.
+func TestTrimToRuneBoundaryNeverWalksBackPastOneCharacter(t *testing.T) {
+	garbage := []byte{'a', 'b', 0x80, 0x80, 0x80, 0x80, 0x80, 0x80}
+	got := trimToRuneBoundary(garbage, 7)
+	if len(got) != 4 {
+		t.Fatalf("invalid bytes must be cut at most three bytes early, got %d bytes %v", len(got), got)
+	}
+	// 0xFF is not a continuation byte, so a cut in front of it does not move.
+	if got := trimToRuneBoundary([]byte{'a', 'b', 0xFF, 'c'}, 2); len(got) != 2 {
+		t.Fatalf("a cut before a stray byte must not walk back, got %v", got)
+	}
+}
+
 // fakeLogRows stands in for pgx.Rows so the download can be rendered - and made
 // to fail part way through - without a database.
 type fakeLogRows struct {

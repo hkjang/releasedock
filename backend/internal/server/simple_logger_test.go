@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"testing"
+	"unicode/utf8"
 )
 
 // storedLogLines returns the run's stored output in the order a reader sees it.
@@ -115,5 +116,32 @@ func TestSimpleRunLoggerChargesTheCapNotice(t *testing.T) {
 	}
 	if stored := storedLogBytes(t, s, runID); stored != 4+len(logCapReachedNotice) {
 		t.Fatalf("log_bytes = %d, want the notice counted with the output", stored)
+	}
+}
+
+// Deployment scripts here print Korean, three bytes a character, and the cap
+// is counted in bytes. The line that reaches it must end on a whole character:
+// the stored bytes are read as-is by the live stream, the log page and the
+// download, so a fragment of a character shows as U+FFFD in all three.
+func TestSimpleRunLoggerCutsTheCappedLineOnACharacterBoundary(t *testing.T) {
+	s, targetID := newSimpleBatchFixture(t)
+	const runID = "cc000000-0000-4000-8000-000000000004"
+	seedSimpleRun(t, s, targetID, runID, "", "RUNNING", true)
+	// 7 bytes falls one byte into the third character of "이미지 로드".
+	logs := &simpleRunLogger{server: s, ctx: context.Background(), runID: runID,
+		budget: logBudget{command: 7, system: maxSimpleRunSystemLogBytes}}
+
+	logs.write("stdout", []byte("이미지 로드\n"))
+	logs.flush()
+
+	got := storedLogLines(t, s, runID)
+	if len(got) != 2 || got[0][0] != "stdout" || got[1] != [2]string{streamSystem, logCapReachedNotice} {
+		t.Fatalf("stored %q, want the capped line followed by the notice once", got)
+	}
+	if line := got[0][1]; !utf8.ValidString(line) || line != "이미" {
+		t.Fatalf("the capped line = %q, want it cut before the split character", line)
+	}
+	if stored := storedLogBytes(t, s, runID); stored != len("이미")+len(logCapReachedNotice) {
+		t.Fatalf("log_bytes = %d, want the bytes actually stored", stored)
 	}
 }
