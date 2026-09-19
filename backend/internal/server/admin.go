@@ -237,7 +237,7 @@ func (s *Server) getOIDCSettings(w http.ResponseWriter, r *http.Request) {
 	// Missing or unset is not an error here; it simply means the redirect URI
 	// falls back to the incoming request.
 	publicURL, _ := s.configuredPublicOrigin(r.Context())
-	mcpOAuth := s.mcpOAuthConfigFrom(r.Context(), r, cfg)
+	mcpOAuth := s.mcpOAuthConfigFrom(r.Context(), cfg)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled": cfg.Enabled, "issuerUrl": cfg.Issuer, "clientId": cfg.ClientID,
 		"secretConfigured": cfg.ClientSecretEnc != "", "redirectUrl": cfg.RedirectURL,

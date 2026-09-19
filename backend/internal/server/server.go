@@ -344,8 +344,14 @@ func (s *Server) withAuth(next http.HandlerFunc) http.HandlerFunc {
 				p, refusal = s.oauthPrincipal(r.Context(), r, bearer)
 				if refusal != nil {
 					// The client gets what to do; the operator gets which
-					// check failed, which the message deliberately omits.
-					s.log.Warn("MCP OAuth token rejected", "reason", refusal.reason, "ip", remoteIP(r))
+					// check failed, which the message deliberately omits —
+					// keyed by the request ID the client also received, so
+					// the two can be matched up.
+					attrs := []any{"reason", refusal.reason, "ip", remoteIP(r)}
+					if id := w.Header().Get("X-Request-ID"); id != "" {
+						attrs = append(attrs, "request_id", id)
+					}
+					s.log.Warn("MCP OAuth token rejected", attrs...)
 					if refusal.status == http.StatusUnauthorized {
 						s.mcpChallenge(w, r, true)
 					}

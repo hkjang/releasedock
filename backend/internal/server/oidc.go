@@ -162,7 +162,7 @@ func (s *Server) authConfig(w http.ResponseWriter, r *http.Request) {
 	// no key needed"; it reveals nothing the metadata document does not.
 	writeJSON(w, http.StatusOK, map[string]any{"local_enabled": true, "oidc": map[string]any{
 		"enabled": cfg.Enabled, "issuer": cfg.Issuer, "autoLogin": cfg.Enabled && cfg.AutoLogin,
-		"mcpOAuth": s.mcpOAuthConfigFrom(r.Context(), r, cfg).Active,
+		"mcpOAuth": s.mcpOAuthConfigFrom(r.Context(), cfg).Active,
 	}})
 }
 

@@ -274,6 +274,12 @@ func (s *Server) putGeneralSettings(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "invalid_settings", "publicUrl must be an HTTPS origin without path, query, fragment, or userinfo")
 			return
 		}
+	} else if oidc, loadErr := s.loadOIDC(r.Context()); loadErr == nil && oidc.MCPOAuthEnabled && strings.TrimSpace(oidc.MCPOAuthResource) == "" {
+		// MCP over SSO derives its resource identifier from this URL when
+		// mcp.oauth.resource is not set (mcpoauth.go); clearing it would switch
+		// SSO off silently. Say so, the way the OIDC settings save does.
+		writeError(w, 400, "invalid_settings", "publicUrl cannot be cleared while MCP SSO is enabled without mcp.oauth.resource: set mcp.oauth.resource or disable mcp.oauth.enabled first")
+		return
 	}
 	allowedOrigins, err := settingStrings(values, "allowedOrigins")
 	if err != nil {

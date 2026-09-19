@@ -62,9 +62,7 @@ const (
 
 func isMCPRequest(r *http.Request) bool { return r.URL.Path == mcpPath }
 
-// mcpOAuthConfig is the resource-server view of the OIDC settings, resolved
-// for one request because the resource identifier may fall back to the
-// request origin.
+// mcpOAuthConfig is the resource-server view of the OIDC settings.
 type mcpOAuthConfig struct {
 	// Enabled is the administrator switch.
 	Enabled bool
@@ -94,36 +92,34 @@ func (cfg mcpOAuthConfig) metadataURL() string {
 
 // mcpResource is the identifier this deployment claims for its MCP endpoint:
 // what the metadata document advertises and what a token's aud must name. An
-// explicit setting wins, then the public URL, and only then the request —
-// anybody can set a Host header, so that is the last resort.
-func (s *Server) mcpResource(ctx context.Context, r *http.Request, cfg oidcSettings) string {
+// explicit setting wins, then the public URL, and that is all: the request
+// itself is never consulted, because the resource is what a token's audience
+// is checked against, and a caller who could steer it through Host or
+// X-Forwarded-Host could present a token minted for some other deployment.
+// Without either setting the switch is inactive, and says so.
+func (s *Server) mcpResource(ctx context.Context, cfg oidcSettings) string {
 	if configured := strings.TrimSpace(cfg.MCPOAuthResource); configured != "" {
 		return configured
 	}
 	if origin, err := s.configuredPublicOrigin(ctx); err == nil && origin != "" {
 		return origin + mcpPath
 	}
-	if r != nil {
-		if origin := s.requestOrigin(ctx, r, cfg.AllowInsecureEndpoints); origin != "" {
-			return origin + mcpPath
-		}
-	}
 	return ""
 }
 
-func (s *Server) mcpOAuthConfig(ctx context.Context, r *http.Request) (mcpOAuthConfig, error) {
+func (s *Server) mcpOAuthConfig(ctx context.Context) (mcpOAuthConfig, error) {
 	settings, err := s.loadOIDC(ctx)
 	if err != nil {
 		return mcpOAuthConfig{}, err
 	}
-	return s.mcpOAuthConfigFrom(ctx, r, settings), nil
+	return s.mcpOAuthConfigFrom(ctx, settings), nil
 }
 
-func (s *Server) mcpOAuthConfigFrom(ctx context.Context, r *http.Request, settings oidcSettings) mcpOAuthConfig {
+func (s *Server) mcpOAuthConfigFrom(ctx context.Context, settings oidcSettings) mcpOAuthConfig {
 	cfg := mcpOAuthConfig{
 		Enabled:       settings.MCPOAuthEnabled,
 		Issuer:        strings.TrimSuffix(strings.TrimSpace(settings.Issuer), "/"),
-		Resource:      s.mcpResource(ctx, r, settings),
+		Resource:      s.mcpResource(ctx, settings),
 		Audiences:     settings.MCPOAuthAudience,
 		Scopes:        settings.MCPOAuthScopes,
 		AllowInsecure: settings.AllowInsecureEndpoints,
@@ -227,7 +223,7 @@ func (s *Server) validateMCPOAuthSettings(ctx context.Context, queryer mcpScopeQ
 // sign in, not who is signed in — and CORS-open because MCP clients that run
 // inside a browser read it from another origin.
 func (s *Server) protectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.mcpOAuthConfig(r.Context(), r)
+	cfg, err := s.mcpOAuthConfig(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "database_error", "could not load MCP OAuth settings")
 		return
@@ -260,7 +256,7 @@ func (s *Server) protectedResourceMetadata(w http.ResponseWriter, r *http.Reques
 // the MCP path, because a REST 401 carrying it would send browsers and other
 // clients somewhere they cannot follow.
 func (s *Server) mcpChallenge(w http.ResponseWriter, r *http.Request, invalidToken bool) {
-	cfg, err := s.mcpOAuthConfig(r.Context(), r)
+	cfg, err := s.mcpOAuthConfig(r.Context())
 	if err != nil || !cfg.Active {
 		return
 	}
@@ -313,7 +309,7 @@ type accessTokenClaims struct {
 // from a key: ViaAPIKey so every key gate applies, scopes from the
 // administrator ceiling rather than from any role claim in the token.
 func (s *Server) oauthPrincipal(ctx context.Context, r *http.Request, token string) (store.Principal, *mcpOAuthRefusal) {
-	cfg, err := s.mcpOAuthConfig(ctx, r)
+	cfg, err := s.mcpOAuthConfig(ctx)
 	if err != nil {
 		s.log.Error("load MCP OAuth settings", "error", err)
 		return store.Principal{}, &mcpOAuthRefusal{status: http.StatusInternalServerError, code: "database_error", reason: "settings: " + err.Error(), message: "could not load authentication settings"}
@@ -647,42 +643,109 @@ func (key jsonWebKey) publicKey() (crypto.PublicKey, bool) {
 // behind it are network round trips to Keycloak; doing them per request would
 // put Keycloak's latency in front of every MCP call. Keys are refreshed after
 // mcpOAuthKeyTTL, or sooner when a token names a kid the cache does not have
-// (key rotation), but not more often than mcpOAuthKeyRetry.
+// (key rotation), but not more often than mcpOAuthKeyRetry — and that
+// interval counts failed attempts too, so a dead Keycloak or a stream of
+// forged kids is asked about at most once per interval.
+//
+// The mutex guards the fields only, never the network: a fetch runs with the
+// mutex released so a token whose kid is already cached verifies while the
+// fetch is in flight, and requests that all need the same fetch share one
+// (inflight) rather than each starting their own.
 type mcpOAuthKeyCache struct {
-	mu      sync.Mutex
-	issuer  string
-	keys    map[string]jsonWebKey
-	fetched time.Time
+	mu     sync.Mutex
+	issuer string
+	keys   map[string]jsonWebKey
+	// fetched is when keys were last read successfully; attempted is the last
+	// fetch, successful or not; lastErr is why the last attempt failed.
+	fetched   time.Time
+	attempted time.Time
+	lastErr   error
+	// inflight is closed when the fetch in progress has been recorded.
+	inflight chan struct{}
+}
+
+// needsFetch is the refresh policy, decided under the lock.
+func (cache *mcpOAuthKeyCache) needsFetch(issuer, kid string, now time.Time) bool {
+	if cache.issuer != issuer {
+		return true
+	}
+	throttled := now.Sub(cache.attempted) <= mcpOAuthKeyRetry
+	if cache.keys == nil || now.Sub(cache.fetched) > mcpOAuthKeyTTL {
+		return !throttled
+	}
+	if _, known := cache.keys[kid]; !known {
+		return !throttled
+	}
+	return false
+}
+
+// record stores the outcome of a fetch. A failure keeps an older key set for
+// the same issuer, but never one that belongs to a different issuer.
+func (cache *mcpOAuthKeyCache) record(issuer string, keys map[string]jsonWebKey, err error, now time.Time) {
+	cache.attempted = now
+	if err == nil {
+		cache.issuer, cache.keys, cache.fetched, cache.lastErr = issuer, keys, now, nil
+		return
+	}
+	cache.lastErr = err
+	if cache.issuer != issuer {
+		cache.issuer, cache.keys, cache.fetched = issuer, nil, time.Time{}
+	}
 }
 
 func (s *Server) mcpSigningKey(ctx context.Context, cfg mcpOAuthConfig, kid, alg string) (crypto.PublicKey, *mcpOAuthRefusal) {
 	if kid == "" {
 		return nil, refuseToken("kid: missing", "SSO 액세스 토큰이 유효하지 않습니다(서명·발급자·만료). 클라이언트에서 다시 로그인하세요.")
 	}
+	unavailable := func(err error) *mcpOAuthRefusal {
+		return &mcpOAuthRefusal{status: http.StatusServiceUnavailable, code: "oidc_discovery_failed", reason: "keys: " + err.Error(),
+			message: "Keycloak 발급자 정보를 읽지 못해 SSO 토큰을 확인할 수 없습니다. 잠시 후 다시 시도하거나 관리자에게 알리세요."}
+	}
 	cache := &s.mcpOAuthKeys
 	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	now := time.Now()
-	stale := cache.issuer != cfg.Issuer || now.Sub(cache.fetched) > mcpOAuthKeyTTL
-	if _, known := cache.keys[kid]; !known && !stale && now.Sub(cache.fetched) > mcpOAuthKeyRetry {
-		stale = true
-	}
-	if stale {
-		keys, err := s.fetchMCPSigningKeys(ctx, cfg)
-		if err != nil {
-			if cache.issuer != cfg.Issuer || cache.keys == nil {
-				// Nothing older to fall back on: say so rather than accept
-				// or refuse on a guess.
-				s.log.Warn("MCP OAuth key fetch", "issuer", cfg.Issuer, "error", err)
-				return nil, &mcpOAuthRefusal{status: http.StatusServiceUnavailable, code: "oidc_discovery_failed", reason: "keys: " + err.Error(),
-					message: "Keycloak 발급자 정보를 읽지 못해 SSO 토큰을 확인할 수 없습니다. 잠시 후 다시 시도하거나 관리자에게 알리세요."}
+	if cache.needsFetch(cfg.Issuer, kid, time.Now()) {
+		if cache.inflight == nil {
+			// This request fetches; anything else that decides it needs the
+			// same fetch while the lock is released waits for this one.
+			done := make(chan struct{})
+			cache.inflight = done
+			cache.mu.Unlock()
+			keys, err := s.fetchMCPSigningKeys(ctx, cfg)
+			cache.mu.Lock()
+			cache.record(cfg.Issuer, keys, err, time.Now())
+			cache.inflight = nil
+			close(done)
+			if err != nil {
+				if cache.keys == nil {
+					s.log.Warn("MCP OAuth key fetch", "issuer", cfg.Issuer, "error", err)
+				} else {
+					s.log.Warn("MCP OAuth key refresh failed; keeping the previous key set", "issuer", cfg.Issuer, "error", err)
+				}
 			}
-			s.log.Warn("MCP OAuth key refresh failed; keeping the previous key set", "issuer", cfg.Issuer, "error", err)
 		} else {
-			cache.issuer, cache.keys, cache.fetched = cfg.Issuer, keys, now
+			done := cache.inflight
+			cache.mu.Unlock()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				return nil, unavailable(fmt.Errorf("waiting for the issuer's key set: %w", ctx.Err()))
+			}
+			cache.mu.Lock()
 		}
 	}
+	if cache.issuer != cfg.Issuer || cache.keys == nil {
+		// Nothing to check against and nothing older to fall back on: say so
+		// rather than accept or refuse on a guess. Within mcpOAuthKeyRetry
+		// this is the cached failure, not a new round trip.
+		err := cache.lastErr
+		cache.mu.Unlock()
+		if err == nil {
+			err = errors.New("no key set for issuer " + cfg.Issuer)
+		}
+		return nil, unavailable(err)
+	}
 	key, known := cache.keys[kid]
+	cache.mu.Unlock()
 	if !known {
 		return nil, refuseToken("kid: "+kid+" not in the issuer's key set", "SSO 액세스 토큰이 유효하지 않습니다(서명·발급자·만료). 클라이언트에서 다시 로그인하세요.")
 	}

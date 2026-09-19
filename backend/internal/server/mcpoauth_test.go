@@ -117,6 +117,27 @@ type fakeIDP struct {
 	ecKey  *ecdsa.PrivateKey
 	kid    string
 	ecKid  string
+
+	// Knobs for the key-cache tests: every request to the IdP is counted;
+	// the JWKS handler signals entered (if set), then waits for block (if
+	// set) before answering, and answers 500 while fail is set.
+	mu      sync.Mutex
+	hits    int
+	entered chan struct{}
+	block   chan struct{}
+	fail    bool
+}
+
+func (idp *fakeIDP) requests() int {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	return idp.hits
+}
+
+func (idp *fakeIDP) setJWKS(entered, block chan struct{}, fail bool) {
+	idp.mu.Lock()
+	defer idp.mu.Unlock()
+	idp.entered, idp.block, idp.fail = entered, block, fail
 }
 
 func newFakeIDP(t *testing.T) *fakeIDP {
@@ -131,6 +152,10 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 	}
 	idp := &fakeIDP{rsaKey: rsaKey, ecKey: ecKey, kid: "rsa-key", ecKid: "ec-key"}
 	idp.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		idp.mu.Lock()
+		idp.hits++
+		entered, block, fail := idp.entered, idp.block, idp.fail
+		idp.mu.Unlock()
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			_ = json.NewEncoder(w).Encode(map[string]any{
@@ -138,6 +163,19 @@ func newFakeIDP(t *testing.T) *fakeIDP {
 				"token_endpoint": idp.server.URL + "/token", "jwks_uri": idp.server.URL + "/jwks",
 			})
 		case "/jwks":
+			if entered != nil {
+				select {
+				case entered <- struct{}{}:
+				default:
+				}
+			}
+			if block != nil {
+				<-block
+			}
+			if fail {
+				http.Error(w, "keycloak is having a moment", http.StatusInternalServerError)
+				return
+			}
 			e := big.NewInt(int64(rsaKey.E)).Bytes()
 			size := (ecKey.Curve.Params().BitSize + 7) / 8
 			_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]string{
@@ -308,8 +346,9 @@ func (f *mcpOAuthFixture) enable(t *testing.T, enabled bool) {
 
 const listTools = `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
 
-// mcp sends one legacy-protocol MCP call with the given bearer.
-func (f *mcpOAuthFixture) mcp(bearer, body string) *httptest.ResponseRecorder {
+// mcp sends one legacy-protocol MCP call with the given bearer; extra headers
+// are what a proxy in front of the server might add.
+func (f *mcpOAuthFixture) mcp(bearer, body string, headers ...string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/mcp", strings.NewReader(body))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json, text/event-stream")
@@ -317,9 +356,30 @@ func (f *mcpOAuthFixture) mcp(bearer, body string) *httptest.ResponseRecorder {
 	if bearer != "" {
 		request.Header.Set("Authorization", "Bearer "+bearer)
 	}
+	for i := 0; i+1 < len(headers); i += 2 {
+		request.Header.Set(headers[i], headers[i+1])
+	}
 	recorder := httptest.NewRecorder()
 	f.handler.ServeHTTP(recorder, request)
 	return recorder
+}
+
+// refusalLog is the log line written for the request that got response, found
+// by the request ID the client was handed, so a test can hold the server to
+// having said why *this* token was refused — not some earlier one.
+func (f *mcpOAuthFixture) refusalLog(t *testing.T, response *httptest.ResponseRecorder) string {
+	t.Helper()
+	id := response.Header().Get("X-Request-ID")
+	if id == "" {
+		t.Fatalf("the response carries no X-Request-ID")
+	}
+	for _, line := range strings.Split(f.logs.String(), "\n") {
+		if strings.Contains(line, "request_id="+id) {
+			return line
+		}
+	}
+	t.Errorf("no log line carries request_id=%s:\n%s", id, f.logs.String())
+	return ""
 }
 
 func (f *mcpOAuthFixture) get(path, bearer string) *httptest.ResponseRecorder {
@@ -352,7 +412,8 @@ func TestMCPOAuthOffByDefaultChangesNothing(t *testing.T) {
 	if withToken.Code != http.StatusUnauthorized || withToken.Header().Get("WWW-Authenticate") != "" || withToken.Body.String() != refusal.Body.String() {
 		t.Fatalf("token with SSO off: %d %q %s", withToken.Code, withToken.Header().Get("WWW-Authenticate"), withToken.Body.String())
 	}
-	if !strings.Contains(f.logs.String(), "inactive: mcp.oauth.enabled is off") {
+	// The log says why, under the request ID the client was handed.
+	if line := f.refusalLog(t, withToken); !strings.Contains(line, "inactive: mcp.oauth.enabled is off") {
 		t.Errorf("the log does not say why the token was ignored:\n%s", f.logs.String())
 	}
 	// And the key works as it always did.
@@ -529,8 +590,11 @@ func TestATokenIsRefusedForTheRightReason(t *testing.T) {
 		if !strings.Contains(response.Body.String(), tc.wantMessage) {
 			t.Errorf("%s: the refusal does not say %q: %s", tc.name, tc.wantMessage, response.Body.String())
 		}
-		if !strings.Contains(f.logs.String(), tc.wantLog) {
-			t.Errorf("%s: the log does not name the failed check %q", tc.name, tc.wantLog)
+		// The line for *this* request — found by its request ID, so a
+		// refusal logged for an earlier case cannot satisfy this one — names
+		// the check that failed.
+		if line := f.refusalLog(t, response); !strings.Contains(line, tc.wantLog) {
+			t.Errorf("%s: the log does not name the failed check %q under request_id=%s: %s", tc.name, tc.wantLog, response.Header().Get("X-Request-ID"), line)
 		}
 		if strings.Contains(f.logs.String(), tc.bearer) {
 			t.Errorf("%s: the token itself was logged", tc.name)
@@ -577,6 +641,159 @@ func TestEnabledWithoutAnIssuerBehavesAsOffAndSaysWhy(t *testing.T) {
 	}
 	if !strings.Contains(f.logs.String(), "oidc.issuer_url is empty") {
 		t.Errorf("the log does not say why SSO is inactive:\n%s", f.logs.String())
+	}
+}
+
+// guards: mcpResource, mcpOAuthConfigFrom, putGeneralSettings
+func TestTheResourceIdentifierNeverComesFromTheRequest(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	f.enable(t, true)
+	// Neither mcp.oauth.resource nor a public URL: the only thing left that
+	// could name a resource is the request itself, and a request is the
+	// caller's to shape. Through a trusted proxy the caller even picks the
+	// host — httptest requests come from 192.0.2.1, so that is the proxy.
+	if _, err := f.store.Pool.Exec(t.Context(), `UPDATE app_settings SET general_config='{}'::jsonb WHERE id='default'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Pool.Exec(t.Context(), `UPDATE network_settings SET trusted_proxy_cidrs=ARRAY['192.0.2.0/24'] WHERE id='default'`); err != nil {
+		t.Fatal(err)
+	}
+	f.server.invalidateNetworkSettings()
+	forged := "http://other-releasedock.internal/mcp"
+	token := f.idp.accessToken(t, forged, map[string]any{"azp": "unrelated-client"})
+	response := f.mcp(token, listTools, "X-Forwarded-Host", "other-releasedock.internal", "X-Forwarded-Proto", "http")
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("a token whose audience is the forwarded host opened MCP: %d %s", response.Code, response.Body.String())
+	}
+	// Inactive, not merely refused: the plain 401 with no challenge, the
+	// metadata gone, and the log saying what is missing.
+	if response.Header().Get("WWW-Authenticate") != "" {
+		t.Errorf("challenge issued without a resource identifier: %q", response.Header().Get("WWW-Authenticate"))
+	}
+	if line := f.refusalLog(t, response); !strings.Contains(line, "inactive: no resource identifier") {
+		t.Errorf("the log does not say the switch is inactive for want of a resource: %s", line)
+	}
+	if metadata := f.get(mcpProtectedResourcePath+mcpPath, ""); metadata.Code != http.StatusNotFound {
+		t.Errorf("metadata served without a resource identifier: %d %s", metadata.Code, metadata.Body.String())
+	}
+	// The same token through the same proxy is not accepted with a public
+	// URL either, because the resource is then that URL, not the header.
+	if _, err := f.store.Pool.Exec(t.Context(), `UPDATE app_settings SET general_config='{"publicUrl":"https://releasedock.example.test"}'::jsonb WHERE id='default'`); err != nil {
+		t.Fatal(err)
+	}
+	if again := f.mcp(token, listTools, "X-Forwarded-Host", "other-releasedock.internal", "X-Forwarded-Proto", "http"); again.Code != http.StatusUnauthorized || !strings.Contains(f.refusalLog(t, again), "audience:") {
+		t.Errorf("forwarded host accepted as audience beside a public URL: %d %s", again.Code, again.Body.String())
+	}
+	// And an administrator cannot clear the public URL from under the
+	// switch: the save is refused with the reason, and SSO keeps working.
+	cleared := f.adminRequest(t, http.MethodPut, "/api/v1/admin/settings/general", map[string]any{"serviceName": "ReleaseDock", "publicUrl": ""})
+	if cleared.Code != http.StatusBadRequest || !strings.Contains(cleared.Body.String(), "mcp.oauth.resource") {
+		t.Errorf("clearing publicUrl while MCP SSO depends on it: %d %s", cleared.Code, cleared.Body.String())
+	}
+	if opened := f.mcp(f.idp.accessToken(t, f.resource, nil), listTools); opened.Code != http.StatusOK {
+		t.Errorf("SSO stopped working after the refused save: %d %s", opened.Code, opened.Body.String())
+	}
+}
+
+// guards: mcpSigningKey, mcpOAuthKeyCache
+func TestKeyFetchesNeitherBlockOtherTokensNorHammerTheIssuer(t *testing.T) {
+	f := newMCPOAuthFixture(t)
+	f.enable(t, true)
+	cache := &f.server.mcpOAuthKeys
+	backdate := func(by time.Duration) {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		cache.fetched, cache.attempted = cache.fetched.Add(-by), cache.attempted.Add(-by)
+	}
+	valid := f.idp.accessToken(t, f.resource, nil)
+	if warm := f.mcp(valid, listTools); warm.Code != http.StatusOK {
+		t.Fatalf("first token: %d %s", warm.Code, warm.Body.String())
+	}
+	unknownKid := f.idp.sign(t, map[string]any{"alg": "RS256", "kid": "rotated-key", "typ": "JWT"}, map[string]any{
+		"iss": f.idp.server.URL, "aud": f.resource, "sub": "subject-mcp", "typ": "Bearer",
+		"exp": time.Now().Add(time.Hour).Unix(), "iat": time.Now().Unix(),
+	})
+
+	// (a) A kid the cache does not have sends the server back to the issuer.
+	// While that round trip is in flight — Keycloak being slow — a token
+	// signed with a key the cache already holds must verify without waiting.
+	entered, block := make(chan struct{}, 1), make(chan struct{})
+	f.idp.setJWKS(entered, block, false)
+	backdate(mcpOAuthKeyRetry + time.Second)
+	fetching := make(chan *httptest.ResponseRecorder, 1)
+	go func() { fetching <- f.mcp(unknownKid, listTools) }()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the unknown kid did not send the server to the issuer")
+	}
+	verified := make(chan *httptest.ResponseRecorder, 1)
+	go func() { verified <- f.mcp(valid, listTools) }()
+	select {
+	case response := <-verified:
+		if response.Code != http.StatusOK {
+			t.Errorf("a cached-key token during a fetch: %d %s", response.Code, response.Body.String())
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("a token with a cached kid waited on the unknown kid's key fetch")
+	}
+	close(block)
+	rotated := <-fetching
+	if rotated.Code != http.StatusUnauthorized || !strings.Contains(f.refusalLog(t, rotated), "kid: rotated-key not in the issuer's key set") {
+		t.Errorf("unknown kid after the fetch: %d %s", rotated.Code, rotated.Body.String())
+	}
+	// (b) A second unknown kid inside the retry window is refused from the
+	// cache; the issuer is not asked again.
+	hits := f.idp.requests()
+	if second := f.mcp(unknownKid, listTools); second.Code != http.StatusUnauthorized {
+		t.Errorf("second unknown kid: %d %s", second.Code, second.Body.String())
+	}
+	if f.idp.requests() != hits {
+		t.Errorf("a second unknown kid within %s hit the issuer again (%d requests, had %d)", mcpOAuthKeyRetry, f.idp.requests(), hits)
+	}
+
+	// (c) A failed refresh keeps the old keys, and is not retried on every
+	// request either.
+	f.idp.setJWKS(nil, nil, true)
+	backdate(mcpOAuthKeyTTL + time.Second)
+	hits = f.idp.requests()
+	if kept := f.mcp(valid, listTools); kept.Code != http.StatusOK {
+		t.Errorf("old keys not kept across a failed refresh: %d %s", kept.Code, kept.Body.String())
+	}
+	if f.idp.requests() <= hits {
+		t.Fatalf("an expired key set was not refreshed")
+	}
+	hits = f.idp.requests()
+	if again := f.mcp(valid, listTools); again.Code != http.StatusOK || f.idp.requests() != hits {
+		t.Errorf("a failed refresh was retried within %s: %d, %d requests, had %d", mcpOAuthKeyRetry, again.Code, f.idp.requests(), hits)
+	}
+	if !strings.Contains(f.logs.String(), "keeping the previous key set") {
+		t.Errorf("a failed refresh was not logged:\n%s", f.logs.String())
+	}
+
+	// (d) With nothing cached at all, a failed fetch is 503 — and the failure
+	// itself is cached for the retry window, so a stream of tokens against a
+	// dead Keycloak does not become a stream of discovery requests.
+	cache.mu.Lock()
+	cache.issuer, cache.keys, cache.fetched, cache.attempted, cache.lastErr = "", nil, time.Time{}, time.Time{}, nil
+	cache.mu.Unlock()
+	hits = f.idp.requests()
+	cold := f.mcp(valid, listTools)
+	if cold.Code != http.StatusServiceUnavailable || !strings.Contains(f.refusalLog(t, cold), "keys: JWKS returned HTTP 500") {
+		t.Errorf("cold cache with the issuer down: %d %s", cold.Code, cold.Body.String())
+	}
+	if f.idp.requests() <= hits {
+		t.Fatalf("a cold cache did not ask the issuer")
+	}
+	hits = f.idp.requests()
+	if repeat := f.mcp(valid, listTools); repeat.Code != http.StatusServiceUnavailable || f.idp.requests() != hits {
+		t.Errorf("a failed cold fetch was retried within %s: %d, %d requests, had %d", mcpOAuthKeyRetry, repeat.Code, f.idp.requests(), hits)
+	}
+	// Once the issuer is back and the window has passed, so is SSO.
+	f.idp.setJWKS(nil, nil, false)
+	backdate(mcpOAuthKeyRetry + time.Second)
+	if recovered := f.mcp(valid, listTools); recovered.Code != http.StatusOK {
+		t.Errorf("no recovery after the issuer came back: %d %s", recovered.Code, recovered.Body.String())
 	}
 }
 
