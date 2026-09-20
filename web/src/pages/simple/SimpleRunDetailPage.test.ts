@@ -1,4 +1,5 @@
 import {
+  appendStreamedLine,
   collectStoredLogs,
   nextLogCursor,
   undeployedPackages,
@@ -81,6 +82,33 @@ describe('paging through the stored lines of a run', () => {
   it('leaves the cursor alone for an empty page and advances it for a filled one', () => {
     expect(nextLogCursor(41, { items: [], lastId: 0, hasMore: true })).toBe(41);
     expect(nextLogCursor(41, { items: [line(42)], lastId: 42, hasMore: false })).toBe(42);
+  });
+});
+
+describe('appending a streamed line', () => {
+  it('keeps the lines of a stream in the order they arrived', () => {
+    let logs: SimpleLogLine[] = [];
+    logs = appendStreamedLine(logs, line(1));
+    logs = appendStreamedLine(logs, line(2));
+    logs = appendStreamedLine(logs, line(3));
+    expect(logs.map((entry) => entry.id)).toEqual([1, 2, 3]);
+  });
+
+  // A reconnect resumes from the last id the view reported, so the first frame
+  // it brings can be the line the view already holds. Returning the same array
+  // keeps React from rendering a change that did not happen.
+  it('returns the same array when the last line arrives again', () => {
+    const logs = [line(1), line(2)];
+    expect(appendStreamedLine(logs, line(2))).toBe(logs);
+  });
+
+  it('drops a frame older than the last line held', () => {
+    const logs = [line(1), line(2), line(3)];
+    expect(appendStreamedLine(logs, line(1))).toBe(logs);
+  });
+
+  it('takes any line into an empty log', () => {
+    expect(appendStreamedLine([], line(7)).map((entry) => entry.id)).toEqual([7]);
   });
 });
 

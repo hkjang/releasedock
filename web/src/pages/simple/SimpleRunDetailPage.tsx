@@ -87,6 +87,16 @@ export async function collectStoredLogs(
   return { lines, cursor, truncated: true };
 }
 
+// appendStreamedLine adds a line the live stream delivered, unless the view
+// already holds it. Comparing against the last id is enough: the server sends
+// lines in id order only, and a reconnect resumes from Last-Event-ID, so the
+// only repeat that can arrive is a line at or before the one held last. A
+// repeat hands back the same array so nothing re-renders for it.
+export function appendStreamedLine(current: SimpleLogLine[], line: SimpleLogLine): SimpleLogLine[] {
+  if (current.length && line.id <= current[current.length - 1].id) return current;
+  return [...current, line];
+}
+
 // One package of the upload this run belongs to, the run being viewed
 // included.
 export interface UploadPackage {
@@ -188,7 +198,7 @@ export function SimpleRunDetailPage() {
       try {
         const parsed = JSON.parse(event.data) as SimpleLogLine;
         lastIdRef.current = parsed.id;
-        setLogs((current) => (current.some((line) => line.id === parsed.id) ? current : [...current, parsed]));
+        setLogs((current) => appendStreamedLine(current, parsed));
       } catch {
         /* a malformed frame must not break the view */
       }
