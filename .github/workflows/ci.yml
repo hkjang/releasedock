@@ -45,6 +45,8 @@ jobs:
         run: |
           (cd backend && go mod download && go mod verify)
           (cd runner && go mod download && go mod verify)
+      - name: Check Go formatting and vet
+        run: make vet
       - run: npm ci
         working-directory: web
       - run: npm test -- --run

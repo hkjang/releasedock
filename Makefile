@@ -1,10 +1,11 @@
 SHELL := /usr/bin/env bash
 .DEFAULT_GOAL := help
 
-.PHONY: help test build package clean start stop restart status logs doctor
+.PHONY: help vet test build package clean start stop restart status logs doctor
 
 help:
-	@echo "make test     Run backend, runner, and web tests"
+	@echo "make vet      Check Go formatting and run go vet on backend and runner"
+	@echo "make test     Run make vet, then backend, runner, and web tests"
 	@echo "make build    Build production binaries and web assets"
 	@echo "make package  Create the offline release archive"
 	@echo "make clean    Remove generated outputs"
@@ -17,7 +18,17 @@ help:
 	@echo "make logs     Tail the API server log"
 	@echo "make doctor   Diagnose configuration and runtime problems"
 
-test:
+vet:
+	@unformatted="$$(gofmt -l backend runner)"; \
+	if [[ -n "$$unformatted" ]]; then \
+		echo "gofmt: the following files are not formatted:" >&2; \
+		echo "$$unformatted" >&2; \
+		exit 1; \
+	fi
+	cd backend && go vet ./...
+	cd runner && go vet ./...
+
+test: vet
 	cd backend && go test ./...
 	cd runner && go test ./...
 	cd web && npm test -- --run

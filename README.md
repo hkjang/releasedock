@@ -41,6 +41,8 @@ make test
 make build
 ```
 
+`make test` 는 먼저 `make vet` 으로 `gofmt` 포맷과 `go vet` 정적 검사를 backend·runner 에 적용한 뒤 테스트를 실행하며, CI 도 같은 순서를 따릅니다.
+
 기동·종료·재기동과 환경 진단은 `make start` / `make stop` / `make restart` / `make status` / `make doctor` 를 사용합니다.
 
 개발 상세는 각 하위 디렉터리의 README를 참고하십시오.
