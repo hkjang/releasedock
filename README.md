@@ -37,9 +37,20 @@ openssl rand -base64 32
 요구 도구는 Go 1.26.6 이상, Node.js 22 이상/npm, PostgreSQL 14 이상입니다. 빌드는 인터넷이 연결된 환경에서 의존성을 내려받아 수행하고, 생성된 패키지만 폐쇄망으로 반입합니다.
 
 ```bash
+(cd web && npm ci)
 make test
 make build
 ```
+
+`make test` 전에 `npm ci`로 웹 테스트 의존성을 설치해야 합니다. `TEST_POSTGRES_DSN`이 미설정이거나 빈 값·공백뿐이면 시작 시 `WARN`을 한 번 출력하고 PostgreSQL 통합 테스트를 생략합니다. 나머지 Go·웹 테스트는 계속 실행되므로, 이때의 성공은 DB 통합 검증까지 통과했다는 뜻이 아닙니다.
+
+DB 통합 테스트도 실행하려면 PostgreSQL에 테스트 전용 DB와 스키마 생성 권한이 있는 계정을 준비하고, 저장소 루트에서 해당 DB의 DSN을 설정합니다. 운영 DB는 사용하지 마십시오.
+
+```bash
+TEST_POSTGRES_DSN='postgres://test_user@127.0.0.1:5432/releasedock_test?sslmode=disable' make test
+```
+
+DB는 자동으로 기동하지 않습니다. 비어 있지 않은 DSN의 연결이나 테스트가 실패하면 `make test`도 실패합니다.
 
 기동·종료·재기동과 환경 진단은 `make start` / `make stop` / `make restart` / `make status` / `make doctor` 를 사용합니다.
 

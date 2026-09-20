@@ -18,6 +18,9 @@ help:
 	@echo "make doctor   Diagnose configuration and runtime problems"
 
 test:
+	@if [[ -z "$${TEST_POSTGRES_DSN//[[:space:]]/}" ]]; then \
+		printf '%s\n' 'WARN: TEST_POSTGRES_DSN is unset or blank; PostgreSQL integration tests will be skipped (see README development section).'; \
+	fi
 	cd backend && go test ./...
 	cd runner && go test ./...
 	cd web && npm test -- --run
