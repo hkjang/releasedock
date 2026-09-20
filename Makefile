@@ -18,6 +18,7 @@ help:
 	@echo "make doctor   Diagnose configuration and runtime problems"
 
 test:
+	@cd backend && go run ./cmd/test-postgres-warning
 	cd backend && go test ./...
 	cd runner && go test ./...
 	cd web && npm test -- --run
