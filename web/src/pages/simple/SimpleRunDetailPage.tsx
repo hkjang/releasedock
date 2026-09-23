@@ -97,6 +97,19 @@ export function appendStreamedLine(current: SimpleLogLine[], line: SimpleLogLine
   return [...current, line];
 }
 
+// streamEndedRun reads the frame the server sends when it stops streaming. It
+// names the run's terminal status when the run is what ended; the frame sent at
+// the server's own thirty-minute limit names a reason instead, and that run is
+// still producing output somebody is watching for.
+export function streamEndedRun(data: string): boolean {
+  try {
+    const parsed = JSON.parse(data) as { status?: string };
+    return typeof parsed.status === 'string' && TERMINAL.includes(parsed.status);
+  } catch {
+    return false;
+  }
+}
+
 // One package of the upload this run belongs to, the run being viewed
 // included.
 export interface UploadPackage {
@@ -161,6 +174,9 @@ export function SimpleRunDetailPage() {
   const [logTruncated, setLogTruncated] = useState(false);
   const [loadingLogs, setLoadingLogs] = useState(true);
   const [copied, setCopied] = useState(false);
+  // Bumped once a closed stream has been accounted for, so a run the server let
+  // go of before it finished gets a new one.
+  const [streamAttempt, setStreamAttempt] = useState(0);
   const lastIdRef = useRef(0);
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -189,7 +205,13 @@ export function SimpleRunDetailPage() {
   }, [loadStoredLogs]);
 
   // Only a run that is still going needs the stream, and it resumes from the
-  // last stored line so nothing is duplicated or skipped.
+  // last stored line so nothing is duplicated or skipped. The effect depends on
+  // the reload function rather than on the run state it belongs to: that state
+  // is a fresh object on every render, and depending on it closed and reopened
+  // the stream once per arriving line - three of those land inside the server's
+  // one-second poll, which is its whole per-user stream budget, and the refused
+  // connection ends the live log with nothing on screen to say so.
+  const reloadRun = run.reload;
   useEffect(() => {
     if (!live || loadingLogs) return;
     const source = new EventSource(`${api.simpleRunLogStreamUrl(id)}?after=${lastIdRef.current}`, { withCredentials: true });
@@ -204,12 +226,20 @@ export function SimpleRunDetailPage() {
       }
     };
     source.addEventListener('log', receive);
-    source.addEventListener('end', () => {
+    // The server also ends a stream at its own thirty-minute limit, with the
+    // run still going - a deployment that long then showed nothing further
+    // until the reader thought to refresh. Another stream is asked for only
+    // when the run was not what ended, and only after the state has been
+    // re-read, so a run that did finish leaves this closed.
+    source.addEventListener('end', (rawEvent: Event) => {
       source.close();
-      void run.reload();
+      const finished = streamEndedRun((rawEvent as MessageEvent<string>).data);
+      void reloadRun().finally(() => {
+        if (!finished) setStreamAttempt((attempt) => attempt + 1);
+      });
     });
     return () => source.close();
-  }, [live, loadingLogs, id, run]);
+  }, [live, loadingLogs, id, reloadRun, streamAttempt]);
 
   useEffect(() => {
     if (live) logEndRef.current?.scrollIntoView({ block: 'end' });

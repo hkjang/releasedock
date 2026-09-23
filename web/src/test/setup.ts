@@ -16,6 +16,11 @@ const storage = (() => {
 
 Object.defineProperty(window, 'localStorage', { configurable: true, value: storage });
 
+// jsdom does not lay anything out and so implements no scrolling. A view that
+// keeps its newest log line in sight calls this on every update, which throws
+// and takes the whole page down before a test can assert anything about it.
+Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: () => {} });
+
 beforeEach(() => {
   window.localStorage.clear();
   document.cookie = 'releasedock_csrf=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
