@@ -1185,11 +1185,12 @@ func (s *Server) streamSimpleRunLogs(w http.ResponseWriter, r *http.Request) {
 	defer maxDuration.Stop()
 	for {
 		rows, err := s.store.Pool.Query(r.Context(),
-			`SELECT id,stream,payload,created_at FROM simple_run_logs WHERE run_id=$1 AND id>$2 ORDER BY id LIMIT 500`, runID, lastID)
+			`SELECT id,stream,payload,created_at FROM simple_run_logs WHERE run_id=$1 AND id>$2 ORDER BY id LIMIT $3`,
+			runID, lastID, logStreamPageSize)
 		if err != nil {
 			return
 		}
-		sent := false
+		sent := 0
 		for rows.Next() {
 			var id int64
 			var stream string
@@ -1201,14 +1202,28 @@ func (s *Server) streamSimpleRunLogs(w http.ResponseWriter, r *http.Request) {
 			encoded, _ := json.Marshal(map[string]any{"id": id, "stream": stream, "message": string(payload), "createdAt": created})
 			fmt.Fprintf(w, "id: %d\nevent: log\ndata: %s\n\n", id, encoded)
 			lastID = id
-			sent = true
+			sent++
 		}
 		rows.Close()
-		if sent {
+		if sent > 0 {
 			flusher.Flush()
 		}
+		// A page that came back full is a page the run had already written
+		// past, so the rest is read at once instead of a page per second: a
+		// deployment that logged tens of thousands of lines would otherwise
+		// trickle onto the screen long after it finished. The drain is bounded
+		// by what the run was allowed to store, and a page that did not fill
+		// falls through to the wait below, so this cannot spin.
+		if sent == logStreamPageSize {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+			continue
+		}
 		_ = s.store.Pool.QueryRow(r.Context(), `SELECT status FROM simple_runs WHERE id=$1`, runID).Scan(&status)
-		if !sent && (status == "SUCCESS" || status == "FAILED" || status == "TIMEOUT") {
+		if sent == 0 && (status == "SUCCESS" || status == "FAILED" || status == "TIMEOUT") {
 			encoded, _ := json.Marshal(map[string]any{"status": status})
 			fmt.Fprintf(w, "event: end\ndata: %s\n\n", encoded)
 			flusher.Flush()

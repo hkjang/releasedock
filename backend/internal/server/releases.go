@@ -1504,11 +1504,11 @@ func (s *Server) streamReleaseLogs(w http.ResponseWriter, r *http.Request) {
 	defer keepaliveTicker.Stop()
 	defer maxDuration.Stop()
 	for {
-		rows, err := s.store.Pool.Query(r.Context(), `SELECT l.id,l.stream,l.payload,l.created_at FROM release_job_logs l JOIN release_jobs j ON j.id=l.job_id WHERE j.release_id=$1 AND l.id>$2 ORDER BY l.id LIMIT 500`, releaseID, lastID)
+		rows, err := s.store.Pool.Query(r.Context(), `SELECT l.id,l.stream,l.payload,l.created_at FROM release_job_logs l JOIN release_jobs j ON j.id=l.job_id WHERE j.release_id=$1 AND l.id>$2 ORDER BY l.id LIMIT $3`, releaseID, lastID, logStreamPageSize)
 		if err != nil {
 			return
 		}
-		sent := false
+		sent := 0
 		for rows.Next() {
 			var id int64
 			var stream string
@@ -1520,16 +1520,26 @@ func (s *Server) streamReleaseLogs(w http.ResponseWriter, r *http.Request) {
 			encoded, _ := json.Marshal(map[string]any{"id": id, "stream": stream, "message": string(payload), "createdAt": created})
 			fmt.Fprintf(w, "id: %d\nevent: log\ndata: %s\n\n", id, encoded)
 			lastID = id
-			sent = true
+			sent++
 		}
 		rows.Close()
-		if sent {
+		if sent > 0 {
 			flusher.Flush()
 		}
-		terminal := jobStatus == "SUCCESS" || jobStatus == "FAILED" || jobStatus == "ROLLED_BACK"
+		// A full page means the job had already written past it, so the rest is
+		// read at once rather than a page per second. See streamSimpleRunLogs:
+		// the two streams are kept the same deliberately.
+		if sent == logStreamPageSize {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
+			continue
+		}
 		_ = s.store.Pool.QueryRow(r.Context(), `SELECT status FROM release_jobs WHERE release_id=$1 ORDER BY created_at DESC,id DESC LIMIT 1`, releaseID).Scan(&jobStatus)
-		terminal = jobStatus == "SUCCESS" || jobStatus == "FAILED" || jobStatus == "ROLLED_BACK"
-		if terminal && !sent {
+		terminal := jobStatus == "SUCCESS" || jobStatus == "FAILED" || jobStatus == "ROLLED_BACK"
+		if terminal && sent == 0 {
 			fmt.Fprint(w, "event: end\ndata: {}\n\n")
 			flusher.Flush()
 			return

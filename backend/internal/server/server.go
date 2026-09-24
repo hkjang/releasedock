@@ -113,6 +113,11 @@ func (s *Server) releaseAIRequest(actorID string) {
 	}
 }
 
+// logStreamPageSize bounds how many stored lines one poll of a log stream
+// loads, so a job with a very long log does not have to be held in memory to be
+// streamed. Both log streams read it.
+const logStreamPageSize = 500
+
 func (s *Server) acquireLogStream(actorID string) bool {
 	s.streamMu.Lock()
 	defer s.streamMu.Unlock()
