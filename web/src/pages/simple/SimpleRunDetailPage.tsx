@@ -97,6 +97,21 @@ export function appendStreamedLine(current: SimpleLogLine[], line: SimpleLogLine
   return [...current, line];
 }
 
+// The readyState the browser reports on an EventSource, spelled out rather
+// than read off EventSource itself: the stream tests replace the global with a
+// stand-in that has no such constants, and a comparison against undefined is
+// false for every state.
+const STREAM_CLOSED = 2;
+
+// streamDisconnected decides whether an error frame is worth telling the reader
+// about. The browser fires error both when it has given up (CLOSED) and when it
+// is about to retry on its own (CONNECTING); only the first leaves the log
+// stopped for good, and announcing the second would ask for a reconnect that
+// spends one of the three streams the server allows a user.
+export function streamDisconnected(readyState: number): boolean {
+  return readyState === STREAM_CLOSED;
+}
+
 // streamEndedRun reads the frame the server sends when it stops streaming. It
 // names the run's terminal status when the run is what ended; the frame sent at
 // the server's own thirty-minute limit names a reason instead, and that run is
@@ -177,6 +192,7 @@ export function SimpleRunDetailPage() {
   // Bumped once a closed stream has been accounted for, so a run the server let
   // go of before it finished gets a new one.
   const [streamAttempt, setStreamAttempt] = useState(0);
+  const [streamLost, setStreamLost] = useState(false);
   const lastIdRef = useRef(0);
   const logEndRef = useRef<HTMLDivElement>(null);
 
@@ -226,6 +242,19 @@ export function SimpleRunDetailPage() {
       }
     };
     source.addEventListener('log', receive);
+    // These are registered with addEventListener rather than assigned to
+    // source.onerror/onopen so that anything standing in for EventSource -
+    // the stream tests use an EventTarget - reaches them by dispatching an
+    // event, the way the browser does.
+    source.addEventListener('open', () => setStreamLost(false));
+    // A stream the browser has given up on fires this once and then nothing.
+    // The run stays RUNNING on screen with a log that stopped, so the reader
+    // is told and given the one reconnect; retrying on a timer here would
+    // spend the server's stream budget against a limit that is often what
+    // closed the stream in the first place.
+    source.addEventListener('error', () => {
+      if (streamDisconnected(source.readyState)) setStreamLost(true);
+    });
     // The server also ends a stream at its own thirty-minute limit, with the
     // run still going - a deployment that long then showed nothing further
     // until the reader thought to refresh. Another stream is asked for only
@@ -244,6 +273,18 @@ export function SimpleRunDetailPage() {
   useEffect(() => {
     if (live) logEndRef.current?.scrollIntoView({ block: 'end' });
   }, [logs, live]);
+
+  // Stored lines are re-read before another stream is asked for, because what
+  // the run wrote while nothing was listening only exists in storage - resuming
+  // from the frame the dead stream stopped at would leave that gap on screen
+  // for good. Bumping the attempt in the same handler keeps it to one stream:
+  // the effect sees the reload in progress, closes the dead one and waits, then
+  // opens a single stream from the cursor the reload left behind.
+  const reconnectStream = () => {
+    setStreamLost(false);
+    setStreamAttempt((attempt) => attempt + 1);
+    void loadStoredLogs();
+  };
 
   const copy = async () => {
     const text = logs.map((line) => line.message).join('\n');
@@ -421,6 +462,15 @@ export function SimpleRunDetailPage() {
             </Stack>
             <Divider sx={{ mb: 1.5 }} />
             {logError && <Alert severity="error" sx={{ mb: 1.5 }}>{logError}</Alert>}
+            {streamLost && (
+              <Alert
+                severity="warning"
+                sx={{ mb: 1.5 }}
+                action={<Button color="inherit" size="small" onClick={reconnectStream}>다시 연결</Button>}
+              >
+                실시간 로그 연결이 끊겼습니다. 아래 로그는 끊긴 시점까지입니다.
+              </Alert>
+            )}
             {logTruncated && (
               <Alert severity="warning" sx={{ mb: 1.5 }}>
                 출력이 길어 처음 {logs.length.toLocaleString()}줄만 표시했습니다. 전체 로그는 위의 &lsquo;로그 내려받기&rsquo;로 받으십시오.

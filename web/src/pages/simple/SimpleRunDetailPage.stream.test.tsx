@@ -1,8 +1,10 @@
 import { ThemeProvider } from '@mui/material';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { api, type SimpleLogLine, type SimpleRun } from '../../api/client';
 import { App } from '../../app/App';
 import { theme } from '../../theme';
+
+const DISCONNECTED_NOTICE = '실시간 로그 연결이 끊겼습니다';
 
 // jsdom has no EventSource, so the browser end of the stream is stood in for
 // here. Only the transport is replaced: the page, its effects and useAsync are
@@ -12,6 +14,9 @@ class TestEventSource extends EventTarget {
   readonly url: string;
   readonly withCredentials: boolean;
   closed = false;
+  // The spec's numbers, as the browser reports them: 0 CONNECTING, 1 OPEN,
+  // 2 CLOSED. A stream stands open until something closes it.
+  readyState = 1;
 
   constructor(url: string, init?: EventSourceInit) {
     super();
@@ -22,10 +27,26 @@ class TestEventSource extends EventTarget {
 
   close() {
     this.closed = true;
+    this.readyState = 2;
   }
 
   emitLog(line: SimpleLogLine) {
     this.dispatchEvent(new MessageEvent('log', { data: JSON.stringify(line) }));
+  }
+
+  // The browser fires error both when it has given the stream up (CLOSED) and
+  // when it is about to retry by itself (CONNECTING); only the state tells the
+  // two apart.
+  emitError(readyState: number) {
+    this.readyState = readyState;
+    if (readyState === 2) this.closed = true;
+    this.dispatchEvent(new Event('error'));
+  }
+
+  emitOpen() {
+    this.readyState = 1;
+    this.closed = false;
+    this.dispatchEvent(new Event('open'));
   }
 
   // The server ends a stream either because the run reached a terminal status
@@ -147,5 +168,79 @@ describe('the live log stream of a running deployment', () => {
     expect(await screen.findByText('종료 코드 0')).toBeVisible();
     expect(source.closed).toBe(true);
     expect(TestEventSource.open).toHaveLength(0);
+  });
+});
+
+describe('a live log stream the browser could not keep', () => {
+  beforeEach(() => {
+    TestEventSource.instances = [];
+    vi.stubGlobal('EventSource', TestEventSource);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('says so when the browser gave the stream up for good', async () => {
+    // A refused stream (the server allows three per user) or a session that
+    // expired leaves the stream CLOSED and fires error once. Nothing else
+    // arrives, so without this the run reads as still running with a log that
+    // silently stopped.
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
+    const source = await openStream();
+
+    await act(async () => source.emitError(2));
+
+    expect(await screen.findByText(DISCONNECTED_NOTICE, { exact: false })).toBeVisible();
+    expect(screen.getByRole('button', { name: '다시 연결' })).toBeVisible();
+  });
+
+  it('stays quiet while the browser is reconnecting by itself', async () => {
+    // A dropped connection the browser will retry leaves the stream
+    // CONNECTING. Saying it is lost would ask the reader to act on something
+    // that is about to fix itself - and every press spends the stream budget.
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
+    const source = await openStream();
+
+    await act(async () => source.emitError(0));
+
+    expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull();
+    expect(screen.queryByRole('button', { name: '다시 연결' })).toBeNull();
+  });
+
+  it('takes the notice back once the stream is open again', async () => {
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
+    const source = await openStream();
+
+    await act(async () => source.emitError(2));
+    expect(await screen.findByText(DISCONNECTED_NOTICE, { exact: false })).toBeVisible();
+
+    await act(async () => source.emitOpen());
+
+    await waitFor(() => expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull());
+  });
+
+  it('collects the stored lines and resumes a single stream from the last one held', async () => {
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
+    const source = await openStream();
+    await act(async () => source.emitError(2));
+    expect(await screen.findByText(DISCONNECTED_NOTICE, { exact: false })).toBeVisible();
+
+    // What the run wrote while nothing was listening is only in storage, so a
+    // reconnect that resumed from the stream's last frame would leave a hole.
+    vi.spyOn(api, 'simpleRunLogs').mockResolvedValue({
+      items: [line(11), line(12)],
+      lastId: 12,
+      hasMore: false,
+    });
+    fireEvent.click(screen.getByRole('button', { name: '다시 연결' }));
+
+    expect(await screen.findByText('line 12')).toBeVisible();
+    // One more stream, not one per press and not a retry loop: the server
+    // refuses a fourth and the notice is the only thing asking for one.
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(2));
+    expect(TestEventSource.instances[1].url).toContain('after=12');
+    expect(TestEventSource.open).toHaveLength(1);
+    expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull();
   });
 });
