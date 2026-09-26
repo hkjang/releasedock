@@ -13,13 +13,14 @@ import (
 	"github.com/hkjang/releasedock/backend/internal/store"
 )
 
-// newSimpleStreamFixture builds the server the way the binary does, because the
-// log stream route goes through the per-user stream accounting that only New
-// sets up, and returns a browser session that may read the seeded run.
+// newSimpleStreamFixture adds a browser session that may read the seeded run to
+// the shared fixture, which is all the log stream route needs beyond it: the
+// per-user stream accounting the route goes through is already wired because
+// the shared fixture builds its server the way the binary does.
 func newSimpleStreamFixture(t *testing.T) (*Server, string, string) {
 	t.Helper()
-	seeded, targetID := newSimpleBatchFixture(t)
-	return New(seeded.store, nil, seeded.log, BuildInfo{}, ""), targetID, simpleStreamSession(t, seeded)
+	s, targetID := newSimpleBatchFixture(t)
+	return s, targetID, simpleStreamSession(t, s)
 }
 
 // simpleStreamSession gives batch-actor a browser session that may read runs,

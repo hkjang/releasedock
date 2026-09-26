@@ -17,7 +17,9 @@ import (
 )
 
 // newSimpleBatchFixture gives a schema-isolated database with one simple target
-// and the user that owns it, which is all the batch question needs.
+// and the user that owns it, which is all the batch question needs. The server
+// is built the way the binary builds it, so a test that reaches a route rather
+// than a method still goes through the wiring only New sets up.
 func newSimpleBatchFixture(t *testing.T) (*Server, string) {
 	t.Helper()
 	dsn := strings.TrimSpace(os.Getenv("TEST_POSTGRES_DSN"))
@@ -68,7 +70,7 @@ func newSimpleBatchFixture(t *testing.T) (*Server, string) {
 		targetID); err != nil {
 		t.Fatalf("seed target: %v", err)
 	}
-	return &Server{store: st, log: slog.New(slog.NewTextHandler(io.Discard, nil))}, targetID
+	return New(st, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), BuildInfo{}, ""), targetID
 }
 
 func seedSimpleRun(t *testing.T, s *Server, targetID, runID, batchID, status string, last bool) {
