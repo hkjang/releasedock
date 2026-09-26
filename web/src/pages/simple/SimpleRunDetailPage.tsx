@@ -209,6 +209,12 @@ export function SimpleRunDetailPage() {
       lastIdRef.current = stored.cursor;
       setLogs(stored.lines);
       setLogTruncated(stored.truncated);
+      // The lines were just collected from the first one, so whatever a dead
+      // stream failed to deliver is on screen now and the notice's claim - that
+      // the log stops where the stream did - is no longer true. Waiting for the
+      // next stream's 'open' frame to take it back is not enough: a finished run
+      // opens no stream at all, and a refused one never opens.
+      setStreamLost(false);
     } catch (cause) {
       setLogError(cause instanceof ApiError ? cause.message : '로그를 불러오지 못했습니다.');
     } finally {
@@ -462,7 +468,11 @@ export function SimpleRunDetailPage() {
             </Stack>
             <Divider sx={{ mb: 1.5 }} />
             {logError && <Alert severity="error" sx={{ mb: 1.5 }}>{logError}</Alert>}
-            {streamLost && (
+            {/* Only a run that is still going has a live connection to have
+                lost, and only that run can be reconnected to - the effect below
+                opens no stream for a terminal one, so the button would sit
+                there answering nothing. */}
+            {streamLost && live && (
               <Alert
                 severity="warning"
                 sx={{ mb: 1.5 }}

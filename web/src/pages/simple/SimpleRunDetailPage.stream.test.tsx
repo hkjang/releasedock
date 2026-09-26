@@ -220,6 +220,77 @@ describe('a live log stream the browser could not keep', () => {
     await waitFor(() => expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull());
   });
 
+  it('takes the notice back once the run has finished and its whole log has been re-read', async () => {
+    // A stream given up on mid-run and a run that then finished is the ordinary
+    // case, not a rare one: whatever closed the stream did not stop the run.
+    // The refresh re-reads every stored line, so the log on screen is the
+    // complete one - leaving it labelled as stopping where the stream did tells
+    // the person checking a closed-network deployment that output is missing
+    // when none is, and offers a reconnect no finished run can answer.
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
+    const source = await openStream();
+    await act(async () => source.emitError(2));
+    expect(await screen.findByText(DISCONNECTED_NOTICE, { exact: false })).toBeVisible();
+
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('SUCCESS', 0));
+    vi.spyOn(api, 'simpleRunLogs').mockResolvedValue({
+      items: [line(11), line(12)],
+      lastId: 12,
+      hasMore: false,
+    });
+    fireEvent.click(screen.getByRole('button', { name: '새로 고침' }));
+
+    expect(await screen.findByText('종료 코드 0')).toBeVisible();
+    expect(await screen.findByText('line 12')).toBeVisible();
+    await waitFor(() => expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull());
+    expect(screen.queryByRole('button', { name: '다시 연결' })).toBeNull();
+    // The run is over, so nothing reopens a stream - which is also why the
+    // 'open' frame that takes the notice back can never arrive here.
+    expect(TestEventSource.open).toHaveLength(0);
+  });
+
+  it('takes the notice back when the refresh re-read the log of a run still going', async () => {
+    // Same re-read, run still RUNNING: the notice has to go for the log being
+    // complete, not for the run being over. Waiting on the next stream's 'open'
+    // frame would hold a false notice up for as long as the server keeps
+    // refusing the stream.
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
+    const source = await openStream();
+    await act(async () => source.emitError(2));
+    expect(await screen.findByText(DISCONNECTED_NOTICE, { exact: false })).toBeVisible();
+
+    vi.spyOn(api, 'simpleRunLogs').mockResolvedValue({
+      items: [line(11), line(12)],
+      lastId: 12,
+      hasMore: false,
+    });
+    fireEvent.click(screen.getByRole('button', { name: '새로 고침' }));
+
+    expect(await screen.findByText('line 12')).toBeVisible();
+    await waitFor(() => expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull());
+    expect(screen.queryByRole('button', { name: '다시 연결' })).toBeNull();
+  });
+
+  it('drops the notice for a finished run even when the log could not be re-read', async () => {
+    // The re-read failing leaves the log as the dead stream left it, but the
+    // run is over: there is no live connection to have lost and no stream the
+    // ' 다시 연결 ' button could open, so the notice would only send the reader
+    // pressing a button that does nothing. The failure itself is reported by
+    // the log error instead.
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
+    const source = await openStream();
+    await act(async () => source.emitError(2));
+    expect(await screen.findByText(DISCONNECTED_NOTICE, { exact: false })).toBeVisible();
+
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('SUCCESS', 0));
+    vi.spyOn(api, 'simpleRunLogs').mockRejectedValue(new Error('down'));
+    fireEvent.click(screen.getByRole('button', { name: '새로 고침' }));
+
+    expect(await screen.findByText('로그를 불러오지 못했습니다.')).toBeVisible();
+    await waitFor(() => expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull());
+    expect(screen.queryByRole('button', { name: '다시 연결' })).toBeNull();
+  });
+
   it('collects the stored lines and resumes a single stream from the last one held', async () => {
     vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('RUNNING'));
     const source = await openStream();
