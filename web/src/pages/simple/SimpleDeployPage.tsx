@@ -20,6 +20,7 @@ import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import { api, ApiError, type SimpleRun, type SimpleTarget } from '../../api/client';
 import { PageHeader } from '../../components/PageHeader';
 import { formatBytes } from '../../utils/format';
+import { streamDisconnected, streamEndedRun } from './SimpleRunDetailPage';
 
 interface LogLine {
   id: number;
@@ -168,9 +169,24 @@ export function SimpleDeployPage() {
   const [stranded, setStranded] = useState(false);
   const [activeRunId, setActiveRunId] = useState('');
   const [logs, setLogs] = useState<LogLine[]>([]);
+  const [streamLost, setStreamLost] = useState(false);
+  // Bumped to ask for another stream on the run already being uploaded.
+  const [streamAttempt, setStreamAttempt] = useState(0);
   const logEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const cancelledRef = useRef(false);
+  // The id of the last line the stream delivered, which is where a reconnect
+  // resumes. It is the server's log id, not the display id below.
+  const logCursorRef = useRef(0);
+  // Display ids are handed out from one counter rather than read off the clock,
+  // because a reconnect restarts the per-stream numbering: two lines a
+  // millisecond-plus-counter scheme gave the same id would collide as React
+  // keys and the log would draw one of them twice.
+  const logSeqRef = useRef(0);
+  const nextLineId = () => {
+    logSeqRef.current += 1;
+    return logSeqRef.current;
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -199,24 +215,61 @@ export function SimpleDeployPage() {
   const selected = useMemo(() => targets.find((target) => target.id === targetId), [targets, targetId]);
   const effectiveTarget = mustChooseTarget ? selected : targets[0];
 
+  // The live log of the package currently uploading. It resumes from the cursor
+  // rather than from the start of the run so that a reconnect neither replays
+  // what is already on screen nor drops what the run wrote while nothing was
+  // listening: the server reads the lines after the cursor out of storage.
   useEffect(() => {
     if (!activeRunId) return;
-    let sequence = 0;
-    const source = new EventSource(api.simpleRunLogStreamUrl(activeRunId), { withCredentials: true });
+    const source = new EventSource(`${api.simpleRunLogStreamUrl(activeRunId)}?after=${logCursorRef.current}`, {
+      withCredentials: true,
+    });
     const receive = (rawEvent: Event) => {
       const event = rawEvent as MessageEvent<string>;
-      sequence += 1;
       try {
-        const parsed = JSON.parse(event.data) as { stream?: string; message?: string };
-        setLogs((current) => [...current.slice(-4998), { id: Date.now() + sequence, stream: parsed.stream ?? 'stdout', message: parsed.message ?? '' }]);
+        const parsed = JSON.parse(event.data) as { id?: number; stream?: string; message?: string };
+        if (typeof parsed.id === 'number') logCursorRef.current = parsed.id;
+        setLogs((current) => [...current.slice(-4998), { id: nextLineId(), stream: parsed.stream ?? 'stdout', message: parsed.message ?? '' }]);
       } catch {
-        setLogs((current) => [...current.slice(-4998), { id: Date.now() + sequence, stream: 'stdout', message: event.data }]);
+        setLogs((current) => [...current.slice(-4998), { id: nextLineId(), stream: 'stdout', message: event.data }]);
       }
     };
     source.addEventListener('log', receive);
-    source.addEventListener('end', () => source.close());
+    // Registered with addEventListener rather than assigned to source.onerror
+    // and source.onopen so that anything standing in for EventSource - the
+    // stream test uses an EventTarget - reaches them by dispatching an event,
+    // the way the browser does.
+    source.addEventListener('open', () => setStreamLost(false));
+    // A stream the browser has given up on fires this once and then nothing
+    // arrives. The upload carries on and the queue keeps polling, so the page
+    // went on reading as progressing above a log that had silently stopped -
+    // and this log is what tells the operator whether the deployment worked.
+    // Retrying on a timer here would spend the server's three-per-user stream
+    // budget against the very limit that most often closed the stream, so the
+    // operator is told and given the one reconnect instead.
+    source.addEventListener('error', () => {
+      if (streamDisconnected(source.readyState)) setStreamLost(true);
+    });
+    // The server also ends a stream at its own thirty-minute ceiling, with the
+    // run still deploying, and the queue is still waiting on that run. Another
+    // stream is asked for only when the frame did not name a terminal status;
+    // a run that did finish leaves this closed, because reopening would only
+    // be answered with another end frame.
+    source.addEventListener('end', (rawEvent: Event) => {
+      source.close();
+      if (!streamEndedRun((rawEvent as MessageEvent<string>).data)) {
+        setStreamAttempt((attempt) => attempt + 1);
+      }
+    });
     return () => source.close();
-  }, [activeRunId]);
+  }, [activeRunId, streamAttempt]);
+
+  // Keeps this to one stream: the effect closes the dead one and opens a single
+  // replacement from the cursor the lost stream left behind.
+  const reconnectStream = () => {
+    setStreamLost(false);
+    setStreamAttempt((attempt) => attempt + 1);
+  };
 
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ block: 'end' });
@@ -305,7 +358,7 @@ export function SimpleDeployPage() {
         continue;
       }
       patchItem(item.key, { status: 'UPLOADING' });
-      setLogs((current) => [...current, { id: Date.now(), stream: 'system', message: `── ${item.file.name} ──` }]);
+      setLogs((current) => [...current, { id: nextLineId(), stream: 'system', message: `── ${item.file.name} ──` }]);
       let runId = '';
       try {
         const created = await api.startSimpleRun(targetId, item.file, {
@@ -314,11 +367,15 @@ export function SimpleDeployPage() {
         });
         runId = created.id;
         patchItem(item.key, { status: 'RUNNING', runId });
+        // Each package is a run of its own, so its log starts from the top and
+        // whatever the previous package left unresolved is no longer current.
+        logCursorRef.current = 0;
+        setStreamLost(false);
         setActiveRunId(runId);
       } catch (cause) {
         const message = cause instanceof ApiError ? cause.message : '배포를 시작하지 못했습니다.';
         patchItem(item.key, { status: 'FAILED', error: message });
-        setLogs((current) => [...current, { id: Date.now(), stream: 'stderr', message }]);
+        setLogs((current) => [...current, { id: nextLineId(), stream: 'stderr', message }]);
         continue;
       }
       let outcome: SimpleRun;
@@ -327,7 +384,7 @@ export function SimpleDeployPage() {
       } catch (cause) {
         const message = `${cause instanceof RunStateUnknown ? cause.message : '배포 진행 상태를 확인하지 못했습니다.'} ${UNKNOWN_ADVICE}`;
         patchItem(item.key, { status: 'UNKNOWN', error: message });
-        setLogs((current) => [...current, { id: Date.now(), stream: 'stderr', message }]);
+        setLogs((current) => [...current, { id: nextLineId(), stream: 'stderr', message }]);
         setError(message);
         unknown = true;
         // The target is still held by this run, so the packages left in the
@@ -512,6 +569,19 @@ export function SimpleDeployPage() {
         <Card>
           <CardContent>
             <Typography variant="subtitle1" sx={{ mb: 1.5 }}>실행 로그</Typography>
+            {/* Only while a run is actually being streamed: once the queue has
+                moved past it there is nothing left to reconnect to, and the
+                notice would sit over a finished log with a button that does
+                nothing. */}
+            {streamLost && Boolean(activeRunId) && (
+              <Alert
+                severity="warning"
+                sx={{ mb: 1.5 }}
+                action={<Button color="inherit" size="small" onClick={reconnectStream}>다시 연결</Button>}
+              >
+                실시간 로그 연결이 끊겼습니다. 아래 로그는 끊긴 시점까지입니다. 배포 자체는 계속 진행됩니다.
+              </Alert>
+            )}
             <Box
               component="pre"
               sx={{
