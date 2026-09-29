@@ -56,17 +56,31 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [connected, setConnected] = useState(false);
   const sequence = useRef(0);
+  const cursor = useRef(0);
+  const [streamAttempt, setStreamAttempt] = useState(0);
+
+  useEffect(() => {
+    cursor.current = 0;
+  }, [releaseId, enabled]);
 
   useEffect(() => {
     if (!releaseId || !enabled) return;
-    const source = new EventSource(api.releaseLogStreamUrl(releaseId), { withCredentials: true });
+    let stopped = false;
+    const source = new EventSource(`${api.releaseLogStreamUrl(releaseId)}?after=${cursor.current}`, { withCredentials: true });
+    const advanceCursor = (value: unknown) => {
+      const id = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
+      if (typeof id === 'number' && Number.isSafeInteger(id) && id > cursor.current) cursor.current = id;
+    };
     source.onopen = () => setConnected(true);
     const receiveLog = (rawEvent: Event) => {
+      if (stopped) return;
       const event = rawEvent as MessageEvent<string>;
+      advanceCursor(event.lastEventId);
       let entry: Omit<LogEntry, 'id'>;
       try {
         const parsed = JSON.parse(event.data) as Partial<LogEntry> & { createdAt?: string; stream?: string; data?: Partial<LogEntry> & { createdAt?: string; stream?: string } };
         const value = parsed.data ?? parsed;
+        advanceCursor(value.id);
         entry = {
           timestamp: value.timestamp ?? value.createdAt,
           level: value.level ?? value.stream,
@@ -81,13 +95,25 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
     };
     source.onmessage = receiveLog;
     source.addEventListener('log', receiveLog);
-    source.addEventListener('end', () => {
+    source.addEventListener('end', (rawEvent) => {
+      if (stopped) return;
+      stopped = true;
       setConnected(false);
       source.close();
+      try {
+        const value = JSON.parse((rawEvent as MessageEvent<string>).data);
+        // Full-mode completion is {}; only the server time limit resumes.
+        if (value?.reason === 'max_duration') setStreamAttempt((current) => current + 1);
+      } catch {
+        // Unknown end frames must not start an automatic reconnect loop.
+      }
     });
     source.onerror = () => setConnected(false);
-    return () => source.close();
-  }, [releaseId, enabled]);
+    return () => {
+      stopped = true;
+      source.close();
+    };
+  }, [releaseId, enabled, streamAttempt]);
 
   return { logs, connected, clear: () => setLogs([]) };
 }
