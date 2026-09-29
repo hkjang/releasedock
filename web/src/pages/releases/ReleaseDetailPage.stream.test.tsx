@@ -142,15 +142,22 @@ describe('release live logs through App', () => {
     expect(TestEventSource.instances).toHaveLength(3);
   });
 
-  it('does not carry the cursor to another release route', async () => {
+  it('does not carry the cursor, displayed lines or connected state to another release route', async () => {
     const { source } = await renderPage();
+    await emit(source, 'open');
     await emit(source, 'log', JSON.stringify(line(57)));
+    expect(screen.getByText('실시간 로그 연결됨')).toBeVisible();
     await act(async () => {
       window.history.pushState({}, '', '/releases/release-2');
       window.dispatchEvent(new PopStateEvent('popstate'));
     });
     const next = await reconnected(2, 0, 'release-2');
     expect(source.closed).toBe(true);
+    expect(screen.queryByText('server line 57')).not.toBeInTheDocument();
+    expect(screen.getByText('실행 로그가 도착하면 여기에 실시간으로 표시됩니다.')).toBeVisible();
+    expect(screen.getByText('로그 연결 대기')).toBeVisible();
+    await emit(next, 'open');
+    expect(screen.getByText('실시간 로그 연결됨')).toBeVisible();
     await timeout(next);
     await reconnected(3, 0, 'release-2');
   });

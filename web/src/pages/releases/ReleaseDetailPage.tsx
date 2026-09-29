@@ -60,7 +60,10 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
   const [streamAttempt, setStreamAttempt] = useState(0);
 
   useEffect(() => {
+    // Another release must start empty; a timeout resume keeps its lines and never runs this.
     cursor.current = 0;
+    setLogs([]);
+    setConnected(false);
   }, [releaseId, enabled]);
 
   useEffect(() => {
