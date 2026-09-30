@@ -4,6 +4,8 @@ import { api } from '../../api/client';
 import { App } from '../../app/App';
 import { theme } from '../../theme';
 import type { Release } from '../../types/domain';
+import type { ReleaseLogState } from './ReleaseDetailPage';
+import { EMPTY_RELEASE_LOGS, LOG_DISPLAY_LIMIT, RELEASE_LOG_TRUNCATED_NOTICE, appendReleaseLogLine } from './ReleaseDetailPage';
 
 // Only the browser transport is replaced; exercise property callbacks too.
 class TestEventSource extends EventTarget {
@@ -37,6 +39,20 @@ const emit = async (source: TestEventSource, type: string, data = '', id = '') =
   await act(async () => source.emit(type, data, id));
 };
 const timeout = (source: TestEventSource) => emit(source, 'end', '{"reason":"max_duration"}');
+
+// One act() for the whole burst. Awaiting a frame at a time costs a React commit
+// per line, which the display limit would multiply into thousands of renders;
+// dispatching inside a single act() lets React fold them into one commit.
+const emitMany = async (source: TestEventSource, ids: number[]) => {
+  await act(async () => {
+    for (const id of ids) source.emit('log', JSON.stringify(line(id)), String(id));
+  });
+};
+const ids = (count: number, first = 1) => Array.from({ length: count }, (_, index) => first + index);
+// Bursting past the display limit renders thousands of rows in one commit,
+// which outlasts the 5s default.
+const SLOW_RENDER_TIMEOUT = 30_000;
+const copiedBody = (lineIds: number[]) => lineIds.map((id) => `${release.createdAt} stdout server line ${id}`).join('\n');
 
 async function renderPage() {
   vi.spyOn(api, 'version').mockResolvedValue({ version: '0.5.24' });
@@ -160,5 +176,120 @@ describe('release live logs through App', () => {
     expect(screen.getByText('실시간 로그 연결됨')).toBeVisible();
     await timeout(next);
     await reconnected(3, 0, 'release-2');
+  });
+
+  it('numbers every line of a batch apart, so React keeps the rows distinct', async () => {
+    // React folds frames that land in one tick into a single commit, so a row
+    // number read inside the state updater is the same for all of them.
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { source } = await renderPage();
+    await act(async () => {
+      for (const id of ids(3)) source.emit('log', JSON.stringify(line(id)), String(id));
+    });
+    for (const id of ids(3)) expect(screen.getByText(`server line ${id}`)).toBeVisible();
+    expect(logged.mock.calls.map(String).filter((text) => text.includes('same key'))).toEqual([]);
+  });
+
+  describe('once the display limit drops the oldest lines', () => {
+    let writeText: ReturnType<typeof vi.fn>;
+    let restoreClipboard: () => void;
+
+    beforeEach(() => {
+      // jsdom ships no clipboard, and vi.restoreAllMocks() does not undo
+      // defineProperty, so the descriptor is put back by hand.
+      writeText = vi.fn(async () => {});
+      const original = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+      restoreClipboard = () => {
+        if (original) Object.defineProperty(navigator, 'clipboard', original);
+        else delete (navigator as { clipboard?: unknown }).clipboard;
+      };
+    });
+    afterEach(() => restoreClipboard());
+
+    const notice = () => screen.queryByText(/오래된 로그 줄이 화면에서 빠졌습니다/);
+    const copyLog = async () => {
+      fireEvent.click(screen.getByRole('button', { name: '전체 로그 복사' }));
+      await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+      return writeText.mock.calls[0][0] as string;
+    };
+
+    it('leaves the view and the copied log untouched while the buffer stays at the limit', async () => {
+      const { source } = await renderPage();
+      await emitMany(source, ids(LOG_DISPLAY_LIMIT));
+      expect(notice()).not.toBeInTheDocument();
+      expect(screen.getByText('server line 1')).toBeVisible();
+      expect(await copyLog()).toBe(copiedBody(ids(LOG_DISPLAY_LIMIT)));
+    }, SLOW_RENDER_TIMEOUT);
+
+    it('warns with the displayed line count and leads the copied log with the notice', async () => {
+      const { source } = await renderPage();
+      await emitMany(source, ids(LOG_DISPLAY_LIMIT + 1));
+      expect(notice()).toHaveTextContent(`현재 최근 ${LOG_DISPLAY_LIMIT.toLocaleString()}줄만 표시합니다.`);
+      expect(screen.queryByText('server line 1')).not.toBeInTheDocument();
+      expect(screen.getByText(`server line ${LOG_DISPLAY_LIMIT + 1}`)).toBeVisible();
+      expect(await copyLog()).toBe(`${RELEASE_LOG_TRUNCATED_NOTICE}\n${copiedBody(ids(LOG_DISPLAY_LIMIT, 2))}`);
+    }, SLOW_RENDER_TIMEOUT);
+
+    it('keeps warning after a max_duration reconnect and stops once the buffer is emptied', async () => {
+      const { source } = await renderPage();
+      await emitMany(source, ids(LOG_DISPLAY_LIMIT + 1));
+      await timeout(source);
+      const next = await reconnected(2, LOG_DISPLAY_LIMIT + 1);
+      expect(notice()).toBeVisible();
+      await emit(next, 'log', JSON.stringify(line(LOG_DISPLAY_LIMIT + 2)), String(LOG_DISPLAY_LIMIT + 2));
+      expect(notice()).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: '지우기' }));
+      expect(notice()).not.toBeInTheDocument();
+    }, SLOW_RENDER_TIMEOUT);
+
+    it('stops warning after leaving and re-entering the tab', async () => {
+      const { source } = await renderPage();
+      await emitMany(source, ids(LOG_DISPLAY_LIMIT + 1));
+      fireEvent.click(screen.getByRole('tab', { name: '실행 단계' }));
+      fireEvent.click(screen.getByRole('tab', { name: '실시간 로그' }));
+      await reconnected(2, 0);
+      expect(notice()).not.toBeInTheDocument();
+    }, SLOW_RENDER_TIMEOUT);
+
+    it('stops warning after routing to another release', async () => {
+      const { source } = await renderPage();
+      await emitMany(source, ids(LOG_DISPLAY_LIMIT + 1));
+      expect(notice()).toBeVisible();
+      await act(async () => {
+        window.history.pushState({}, '', '/releases/release-2');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      });
+      await reconnected(2, 0, 'release-2');
+      expect(notice()).not.toBeInTheDocument();
+    }, SLOW_RENDER_TIMEOUT);
+  });
+});
+
+describe('appendReleaseLogLine', () => {
+  const entry = (id: number) => ({ id, message: `line ${id}` });
+  const append = (count: number, limit: number) =>
+    ids(count).reduce<ReleaseLogState>((state, id) => appendReleaseLogLine(state, entry(id), limit), EMPTY_RELEASE_LOGS);
+
+  it('reports no truncation while the buffer only reaches the limit', () => {
+    const state = append(3, 3);
+    expect(state.lines.map((item) => item.id)).toEqual([1, 2, 3]);
+    expect(state.truncated).toBe(false);
+  });
+
+  it('turns truncation on at the first dropped line and never back off', () => {
+    const state = append(4, 3);
+    expect(state.lines.map((item) => item.id)).toEqual([2, 3, 4]);
+    expect(state.truncated).toBe(true);
+    const later = appendReleaseLogLine(state, entry(5), 100);
+    expect(later.lines.map((item) => item.id)).toEqual([2, 3, 4, 5]);
+    expect(later.truncated).toBe(true);
+  });
+
+  it('holds the newest lines at the production limit', () => {
+    const state = append(LOG_DISPLAY_LIMIT + 1, LOG_DISPLAY_LIMIT);
+    expect(state.lines).toHaveLength(LOG_DISPLAY_LIMIT);
+    expect(state.lines[0].id).toBe(2);
+    expect(state.truncated).toBe(true);
   });
 });

@@ -52,17 +52,45 @@ interface LogEntry {
 
 type ReleaseAction = 'submit-review' | 'review' | 'approve' | 'reject' | 'deploy' | 'rollback' | 'retry' | 'edit';
 
+// LOG_DISPLAY_LIMIT bounds the lines the live log view holds. Full mode streams
+// and nothing else - there is no stored-log query and no download - so a line
+// pushed out of this buffer is gone, and the reader has to be told.
+export const LOG_DISPLAY_LIMIT = 4999;
+
+// RELEASE_LOG_TRUNCATED_NOTICE leads a copied log the view could not hold whole.
+// The lines that went missing are the oldest ones, so the notice belongs at the
+// top: a paste that begins mid-deploy otherwise reads as a deploy that began there.
+export const RELEASE_LOG_TRUNCATED_NOTICE =
+  '[releasedock] 화면 표시 한도를 넘어 앞부분의 오래된 로그가 빠졌습니다. 아래는 마지막 부분만 담고 있습니다.';
+
+export interface ReleaseLogState {
+  lines: LogEntry[];
+  truncated: boolean;
+}
+
+// appendReleaseLogLine trims and records the loss in one step, so the flag can
+// never disagree with the buffer it describes. Reaching the limit exactly is not
+// truncation; only a line actually pushed out is.
+export function appendReleaseLogLine(state: ReleaseLogState, entry: LogEntry, limit = LOG_DISPLAY_LIMIT): ReleaseLogState {
+  const lines = [...state.lines, entry];
+  const dropped = lines.length > limit;
+  return { lines: dropped ? lines.slice(lines.length - limit) : lines, truncated: state.truncated || dropped };
+}
+
+export const EMPTY_RELEASE_LOGS: ReleaseLogState = { lines: [], truncated: false };
+
 function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [logs, setLogs] = useState<ReleaseLogState>(EMPTY_RELEASE_LOGS);
   const [connected, setConnected] = useState(false);
   const sequence = useRef(0);
   const cursor = useRef(0);
   const [streamAttempt, setStreamAttempt] = useState(0);
 
   useEffect(() => {
-    // Another release must start empty; a timeout resume keeps its lines and never runs this.
+    // Another release must start empty; a timeout resume keeps its lines, its
+    // truncation notice and never runs this.
     cursor.current = 0;
-    setLogs([]);
+    setLogs(EMPTY_RELEASE_LOGS);
     setConnected(false);
   }, [releaseId, enabled]);
 
@@ -93,8 +121,11 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
       } catch {
         entry = { message: event.data };
       }
-      sequence.current += 1;
-      setLogs((current) => [...current.slice(-4998), { ...entry, id: sequence.current }]);
+      // Read the row number here, not inside the updater: React runs queued
+      // updaters at flush time, where a whole batch would read the same value
+      // and hand every row of it the same key.
+      const id = (sequence.current += 1);
+      setLogs((current) => appendReleaseLogLine(current, { ...entry, id }));
     };
     source.onmessage = receiveLog;
     source.addEventListener('log', receiveLog);
@@ -118,7 +149,7 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
     };
   }, [releaseId, enabled, streamAttempt]);
 
-  return { logs, connected, clear: () => setLogs([]) };
+  return { logs: logs.lines, truncated: logs.truncated, connected, clear: () => setLogs(EMPTY_RELEASE_LOGS) };
 }
 
 function StepIcon({ status }: { status: StepStatus }) {
@@ -283,14 +314,17 @@ function ReleaseActions({ release, onUpdated }: { release: Release; onUpdated: (
 }
 
 function LogPanel({ releaseId, enabled }: { releaseId: string; enabled: boolean }) {
-  const { logs, connected, clear } = useReleaseLogs(releaseId, enabled);
+  const { logs, truncated, connected, clear } = useReleaseLogs(releaseId, enabled);
   const endRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   useEffect(() => {
     if (autoScroll) endRef.current?.scrollIntoView({ block: 'nearest' });
   }, [logs, autoScroll]);
 
-  const copy = async () => navigator.clipboard.writeText(logs.map((log) => `${log.timestamp || ''} ${log.level || ''} ${log.message}`).join('\n'));
+  const copy = async () => {
+    const text = logs.map((log) => `${log.timestamp || ''} ${log.level || ''} ${log.message}`).join('\n');
+    await navigator.clipboard.writeText(truncated ? `${RELEASE_LOG_TRUNCATED_NOTICE}\n${text}` : text);
+  };
   return (
     <Box>
       <Stack direction={{ xs: 'column', sm: 'row' }} alignItems={{ xs: 'flex-start', sm: 'center' }} gap={1.25} sx={{ mb: 1.5 }}>
@@ -304,6 +338,11 @@ function LogPanel({ releaseId, enabled }: { releaseId: string; enabled: boolean 
           <Button size="small" onClick={clear} disabled={!logs.length}>지우기</Button>
         </Stack>
       </Stack>
+      {truncated && (
+        <Alert severity="warning" sx={{ mb: 1.5 }}>
+          표시 한도를 넘어 오래된 로그 줄이 화면에서 빠졌습니다. 현재 최근 {logs.length.toLocaleString()}줄만 표시합니다.
+        </Alert>
+      )}
       <Box
         role="log"
         aria-live="polite"
