@@ -28,6 +28,34 @@ interface LogLine {
   message: string;
 }
 
+// DEPLOY_LOG_DISPLAY_LIMIT bounds the lines the live log holds. One upload's
+// packages share that buffer - it is emptied when a batch starts, not between
+// packages - so the limit falls on the whole batch and what it pushes out is
+// the output of the packages that went first.
+export const DEPLOY_LOG_DISPLAY_LIMIT = 4999;
+
+// DEPLOY_LOG_TRUNCATED_NOTICE opens the warning. The lines that went missing
+// are the oldest ones, which is the opposite of what the run detail view drops,
+// so its wording cannot be borrowed: a reader told the end was cut would read
+// the surviving tail as the whole deployment.
+export const DEPLOY_LOG_TRUNCATED_NOTICE = '표시 한도를 넘어 앞부분의 오래된 로그 줄이 화면에서 빠졌습니다.';
+
+export interface DeployLogState {
+  lines: LogLine[];
+  truncated: boolean;
+}
+
+// appendDeployLogLine trims and records the loss in one step, so the flag can
+// never disagree with the buffer it describes. Reaching the limit exactly is
+// not truncation; only a line actually pushed out is.
+export function appendDeployLogLine(state: DeployLogState, entry: LogLine, limit = DEPLOY_LOG_DISPLAY_LIMIT): DeployLogState {
+  const lines = [...state.lines, entry];
+  const dropped = lines.length > limit;
+  return { lines: dropped ? lines.slice(lines.length - limit) : lines, truncated: state.truncated || dropped };
+}
+
+export const EMPTY_DEPLOY_LOGS: DeployLogState = { lines: [], truncated: false };
+
 type ItemStatus = 'QUEUED' | 'UPLOADING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'TIMEOUT' | 'SKIPPED' | 'UNKNOWN';
 
 export interface QueueItem {
@@ -168,7 +196,7 @@ export function SimpleDeployPage() {
   const [error, setError] = useState('');
   const [stranded, setStranded] = useState(false);
   const [activeRunId, setActiveRunId] = useState('');
-  const [logs, setLogs] = useState<LogLine[]>([]);
+  const [logs, setLogs] = useState<DeployLogState>(EMPTY_DEPLOY_LOGS);
   const [streamLost, setStreamLost] = useState(false);
   // Bumped to ask for another stream on the run already being uploaded.
   const [streamAttempt, setStreamAttempt] = useState(0);
@@ -229,9 +257,11 @@ export function SimpleDeployPage() {
       try {
         const parsed = JSON.parse(event.data) as { id?: number; stream?: string; message?: string };
         if (typeof parsed.id === 'number') logCursorRef.current = parsed.id;
-        setLogs((current) => [...current.slice(-4998), { id: nextLineId(), stream: parsed.stream ?? 'stdout', message: parsed.message ?? '' }]);
+        const entry = { id: nextLineId(), stream: parsed.stream ?? 'stdout', message: parsed.message ?? '' };
+        setLogs((current) => appendDeployLogLine(current, entry));
       } catch {
-        setLogs((current) => [...current.slice(-4998), { id: nextLineId(), stream: 'stdout', message: event.data }]);
+        const entry = { id: nextLineId(), stream: 'stdout', message: event.data };
+        setLogs((current) => appendDeployLogLine(current, entry));
       }
     };
     source.addEventListener('log', receive);
@@ -335,7 +365,9 @@ export function SimpleDeployPage() {
     setRunning(true);
     setError('');
     setStranded(false);
-    setLogs([]);
+    // A new upload starts from an empty buffer, so nothing is missing from it
+    // yet. A reconnect keeps both the lines and the warning instead.
+    setLogs(EMPTY_DEPLOY_LOGS);
 
     // Every file of one click shares a batch id, and the last one is marked.
     // The stages an administrator set to run once per upload — Harbor
@@ -358,7 +390,8 @@ export function SimpleDeployPage() {
         continue;
       }
       patchItem(item.key, { status: 'UPLOADING' });
-      setLogs((current) => [...current, { id: nextLineId(), stream: 'system', message: `── ${item.file.name} ──` }]);
+      const separator = { id: nextLineId(), stream: 'system', message: `── ${item.file.name} ──` };
+      setLogs((current) => appendDeployLogLine(current, separator));
       let runId = '';
       try {
         const created = await api.startSimpleRun(targetId, item.file, {
@@ -375,7 +408,8 @@ export function SimpleDeployPage() {
       } catch (cause) {
         const message = cause instanceof ApiError ? cause.message : '배포를 시작하지 못했습니다.';
         patchItem(item.key, { status: 'FAILED', error: message });
-        setLogs((current) => [...current, { id: nextLineId(), stream: 'stderr', message }]);
+        const failure = { id: nextLineId(), stream: 'stderr', message };
+        setLogs((current) => appendDeployLogLine(current, failure));
         continue;
       }
       let outcome: SimpleRun;
@@ -384,7 +418,8 @@ export function SimpleDeployPage() {
       } catch (cause) {
         const message = `${cause instanceof RunStateUnknown ? cause.message : '배포 진행 상태를 확인하지 못했습니다.'} ${UNKNOWN_ADVICE}`;
         patchItem(item.key, { status: 'UNKNOWN', error: message });
-        setLogs((current) => [...current, { id: nextLineId(), stream: 'stderr', message }]);
+        const abandoned = { id: nextLineId(), stream: 'stderr', message };
+        setLogs((current) => appendDeployLogLine(current, abandoned));
         setError(message);
         unknown = true;
         // The target is still held by this run, so the packages left in the
@@ -565,10 +600,19 @@ export function SimpleDeployPage() {
         </Card>
       )}
 
-      {Boolean(logs.length) && (
+      {Boolean(logs.lines.length) && (
         <Card>
           <CardContent>
             <Typography variant="subtitle1" sx={{ mb: 1.5 }}>실행 로그</Typography>
+            {/* One upload's packages share this buffer, so the lines it pushed
+                out are the output of the packages that went first - and this
+                screen offers no way to read them back. */}
+            {logs.truncated && (
+              <Alert severity="warning" sx={{ mb: 1.5 }}>
+                {DEPLOY_LOG_TRUNCATED_NOTICE} 현재 최근 {logs.lines.length.toLocaleString()}줄만 표시합니다. 각 실행의
+                전체 로그는 &lsquo;실행 기록&rsquo;에서 해당 실행을 열어 &lsquo;로그 내려받기&rsquo;로 받을 수 있습니다.
+              </Alert>
+            )}
             {/* Only while a run is actually being streamed: once the queue has
                 moved past it there is nothing left to reconnect to, and the
                 notice would sit over a finished log with a button that does
@@ -597,7 +641,7 @@ export function SimpleDeployPage() {
                 wordBreak: 'break-all',
               }}
             >
-              {logs.map((line) => (
+              {logs.lines.map((line) => (
                 <Box
                   key={line.id}
                   component="span"
