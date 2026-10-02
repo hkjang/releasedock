@@ -3,6 +3,12 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { api, type SimpleLogLine, type SimpleRun, type SimpleTarget } from '../../api/client';
 import { App } from '../../app/App';
 import { theme } from '../../theme';
+import {
+  appendDeployLogLine,
+  DEPLOY_LOG_DISPLAY_LIMIT,
+  DEPLOY_LOG_TRUNCATED_NOTICE,
+  EMPTY_DEPLOY_LOGS,
+} from './SimpleDeployPage';
 
 const DISCONNECTED_NOTICE = '실시간 로그 연결이 끊겼습니다';
 
@@ -223,5 +229,87 @@ describe('the live log the deploy page shows while it uploads', () => {
     expect(source.closed).toBe(true);
     expect(TestEventSource.open).toHaveLength(0);
     expect(TestEventSource.instances).toHaveLength(1);
+  });
+
+  // One upload's packages share this buffer - it is emptied when a batch
+  // starts, not between packages - so the lines pushed out of it are usually
+  // the first packages' output, and this screen has neither a copy button nor
+  // a link to the stored log. A reader judging the deployment from a log whose
+  // beginning quietly went missing has no way to tell that it did.
+  // Drawing five thousand log rows is what this costs, so it is the only
+  // rendered case: the boundary itself is pinned down on the pure helper below.
+  it('warns once the batch log pushes its oldest line out, keeps the warning across a reconnect, and clears it for the next batch', async () => {
+    const source = await startUpload();
+    // The separator the queue writes for the package holds the first line of
+    // the buffer, so this run's output pushes it, and only it, out.
+    await act(async () => {
+      for (let id = 1; id <= DEPLOY_LOG_DISPLAY_LIMIT; id += 1) source.emitLog(line(id));
+    });
+
+    const notice = await screen.findByText(DEPLOY_LOG_TRUNCATED_NOTICE, { exact: false });
+    expect(notice).toBeVisible();
+    expect(notice).toHaveTextContent(`현재 최근 ${DEPLOY_LOG_DISPLAY_LIMIT.toLocaleString()}줄만 표시합니다.`);
+    expect(notice).toHaveTextContent('로그 내려받기');
+    // The front of the log is what went: the separator naming the package is
+    // gone from the view while the newest line is still there.
+    expect(screen.queryByText('── ai-portal-v2.4.1.tar.gz ──')).toBeNull();
+    expect(screen.getByText(`line ${DEPLOY_LOG_DISPLAY_LIMIT}`)).toBeVisible();
+
+    // The server's own ceiling reopens the stream onto the same buffer, and the
+    // lines are still missing from it, so the notice has to survive that.
+    await act(async () => source.emitMaxDuration());
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(2));
+    expect(screen.getByText(DEPLOY_LOG_TRUNCATED_NOTICE, { exact: false })).toBeVisible();
+
+    // Nor does the run finishing restore what went missing.
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('SUCCESS', 0));
+    await waitFor(() => expect(screen.queryByRole('button', { name: '남은 파일 중단' })).toBeNull(), { timeout: 5000 });
+    expect(screen.getByText(DEPLOY_LOG_TRUNCATED_NOTICE, { exact: false })).toBeVisible();
+
+    // The next batch empties the buffer, and a notice about lines that are no
+    // longer missing would send the reader after a log that is whole.
+    const input = document.querySelector('input[type="file"]');
+    if (!input) throw new Error('the deploy page rendered no file input');
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [new File(['payload'], 'ai-portal-v2.4.2.tar.gz')] } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: '배포 실행' }));
+    });
+
+    await waitFor(() => expect(screen.queryByText(DEPLOY_LOG_TRUNCATED_NOTICE, { exact: false })).toBeNull());
+  }, 20000);
+});
+
+// The boundary is checked here rather than through the page because proving it
+// on screen costs a render of five thousand log rows per case.
+describe('appendDeployLogLine', () => {
+  const entry = (id: number) => ({ id, stream: 'stdout', message: `line ${id}` });
+
+  it('keeps every line while the buffer only reaches the limit', () => {
+    let state = EMPTY_DEPLOY_LOGS;
+    for (let id = 1; id <= 3; id += 1) state = appendDeployLogLine(state, entry(id), 3);
+
+    expect(state.lines.map((row) => row.message)).toEqual(['line 1', 'line 2', 'line 3']);
+    expect(state.truncated).toBe(false);
+  });
+
+  it('drops the oldest line and reports the loss once a line is pushed out', () => {
+    let state = EMPTY_DEPLOY_LOGS;
+    for (let id = 1; id <= 4; id += 1) state = appendDeployLogLine(state, entry(id), 3);
+
+    expect(state.lines.map((row) => row.message)).toEqual(['line 2', 'line 3', 'line 4']);
+    expect(state.truncated).toBe(true);
+  });
+
+  it('goes on reporting a loss that already happened', () => {
+    // The flag describes the buffer, not the last append: the beginning stays
+    // missing however many lines arrive afterwards.
+    let state = appendDeployLogLine({ lines: [entry(1), entry(2), entry(3)], truncated: true }, entry(4), 10);
+
+    state = appendDeployLogLine(state, entry(5), 10);
+
+    expect(state.lines).toHaveLength(5);
+    expect(state.truncated).toBe(true);
   });
 });
