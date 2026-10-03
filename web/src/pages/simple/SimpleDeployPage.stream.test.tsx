@@ -1,6 +1,6 @@
 import { ThemeProvider } from '@mui/material';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { api, type SimpleLogLine, type SimpleRun, type SimpleTarget } from '../../api/client';
+import { api, ApiError, type SimpleLogLine, type SimpleRun, type SimpleTarget } from '../../api/client';
 import { App } from '../../app/App';
 import { theme } from '../../theme';
 import {
@@ -96,17 +96,20 @@ function line(id: number): SimpleLogLine {
   return { id, stream: 'stdout', message: `line ${id}`, createdAt: '2026-09-28T00:00:00Z' };
 }
 
-// Drives the page the way an operator does: drop one package in, press the
-// button, and let the queue upload it. The run is left RUNNING so the stream
-// the queue opened stays the one under test.
-async function startUpload(): Promise<TestEventSource> {
+const PACKAGE_NAME = 'ai-portal-v2.4.1.tar.gz';
+
+// Mounts the page through the real route with one package waiting in the queue.
+// The permissions are the signed-in operator's: reading the run history is a
+// permission of its own, so an account that may deploy and nothing else is a
+// case the page has to render for.
+async function dropPackage(permissions = ['simple.deploy', 'simple.read']): Promise<void> {
   vi.spyOn(api, 'version').mockResolvedValue({ version: '0.5.23' });
   vi.spyOn(api, 'me').mockResolvedValue({
     id: 'user-1',
     username: 'deployer',
     displayName: '배포 담당자',
     roles: ['operator'],
-    permissions: ['simple.deploy', 'simple.read'],
+    permissions,
   });
   vi.spyOn(api, 'simpleTargets').mockResolvedValue({ items: [target()], commandMode: 'SHARED' });
   vi.spyOn(api, 'startSimpleRun').mockResolvedValue(simpleRun('RUNNING'));
@@ -117,10 +120,17 @@ async function startUpload(): Promise<TestEventSource> {
   expect(await screen.findByRole('heading', { name: '배포' })).toBeVisible();
   const input = view.container.querySelector('input[type="file"]');
   if (!input) throw new Error('the deploy page rendered no file input');
-  const file = new File(['payload'], 'ai-portal-v2.4.1.tar.gz', { type: 'application/gzip' });
+  const file = new File(['payload'], PACKAGE_NAME, { type: 'application/gzip' });
   await act(async () => {
     fireEvent.change(input, { target: { files: [file] } });
   });
+}
+
+// Drives the page the way an operator does: drop one package in, press the
+// button, and let the queue upload it. The run is left RUNNING so the stream
+// the queue opened stays the one under test.
+async function startUpload(permissions?: string[]): Promise<TestEventSource> {
+  await dropPackage(permissions);
   await act(async () => {
     fireEvent.click(screen.getByRole('button', { name: '배포 실행' }));
   });
@@ -279,6 +289,73 @@ describe('the live log the deploy page shows while it uploads', () => {
 
     await waitFor(() => expect(screen.queryByText(DEPLOY_LOG_TRUNCATED_NOTICE, { exact: false })).toBeNull());
   }, 20000);
+});
+
+// The deploy screen is the only place that knows which run each package of the
+// upload became. It spends three separate notices sending the reader to that
+// run - the truncated live log, the abandoned-poll error, the stranded-stages
+// warning - and until now none of them could be followed from here: the run id
+// was held in the queue and thrown away when the page was left.
+describe("the deploy queue's link to each package's run", () => {
+  const RUN_LINK = `${PACKAGE_NAME} 실행 상세`;
+
+  beforeEach(() => {
+    TestEventSource.instances = [];
+    vi.stubGlobal('EventSource', TestEventSource);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('has nothing to link to before the package is uploaded', async () => {
+    await dropPackage();
+
+    expect(screen.getByText(PACKAGE_NAME)).toBeVisible();
+    expect(screen.queryByRole('link', { name: RUN_LINK })).toBeNull();
+  });
+
+  it('links a package to its own run as soon as the upload created it', async () => {
+    await startUpload();
+
+    const link = await screen.findByRole('link', { name: RUN_LINK });
+    expect(link).toHaveAttribute('href', '/simple/runs/run-1');
+  });
+
+  it('keeps the link once the run has finished', async () => {
+    // This is when it matters most: the queue has stopped streaming, the live
+    // log is as complete as it will ever be on this screen, and the stored log
+    // and its download only exist on the run's own page.
+    const source = await startUpload();
+    vi.spyOn(api, 'simpleRun').mockResolvedValue(simpleRun('SUCCESS', 0));
+    await act(async () => source.emitEnd('SUCCESS'));
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: '남은 파일 중단' })).toBeNull(), {
+      timeout: 5000,
+    });
+    expect(screen.getByRole('link', { name: RUN_LINK })).toHaveAttribute('href', '/simple/runs/run-1');
+  });
+
+  it('keeps the link to a run the queue gave up reading', async () => {
+    // The queue stops asking when the record cannot be read and says the
+    // deployment may still be going, so the result has to be looked up - and
+    // this row holds the only pointer to the run it has to be looked up by.
+    await startUpload();
+    vi.spyOn(api, 'simpleRun').mockRejectedValue(new ApiError('실행 기록을 찾을 수 없습니다.', 404));
+
+    expect(await screen.findByText('확인 불가', {}, { timeout: 5000 })).toBeVisible();
+    expect(screen.getByRole('link', { name: RUN_LINK })).toHaveAttribute('href', '/simple/runs/run-1');
+  });
+
+  it('offers no link to an operator who may deploy but not read the run history', async () => {
+    // The run detail route is guarded by simple.read and sends an account
+    // without it to the forbidden page, so a link drawn for that account only
+    // throws the reader out of the deployment they are watching.
+    await startUpload(['simple.deploy']);
+
+    expect(await screen.findByText(PACKAGE_NAME)).toBeVisible();
+    expect(screen.queryByRole('link', { name: RUN_LINK })).toBeNull();
+  });
 });
 
 // The boundary is checked here rather than through the page because proving it

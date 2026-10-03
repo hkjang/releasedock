@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link as RouterLink } from 'react-router-dom';
 import {
   Alert,
   Box,
@@ -18,6 +19,7 @@ import CloudUploadRoundedIcon from '@mui/icons-material/CloudUploadRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import { api, ApiError, type SimpleRun, type SimpleTarget } from '../../api/client';
+import { useAuth } from '../../auth/AuthContext';
 import { PageHeader } from '../../components/PageHeader';
 import { formatBytes } from '../../utils/format';
 import { streamDisconnected, streamEndedRun } from './SimpleRunDetailPage';
@@ -187,6 +189,11 @@ function newBatchId(): string {
 }
 
 export function SimpleDeployPage() {
+  const { hasPermission } = useAuth();
+  // The run detail view is behind a permission of its own and sends an account
+  // without it to the forbidden page, so for that account there is no run to
+  // link to - only a way out of the deployment being watched.
+  const canReadRuns = hasPermission('simple.read');
   const [targets, setTargets] = useState<SimpleTarget[]>([]);
   const [targetId, setTargetId] = useState('');
   const [queue, setQueue] = useState<QueueItem[]>([]);
@@ -559,6 +566,27 @@ export function SimpleDeployPage() {
                           {item.exitCode !== undefined && item.exitCode !== null && ` · exit ${item.exitCode}`}
                         </Typography>
                       </Box>
+                      {/* This row holds the only pointer there is to the run
+                          the package became: the live log above shares one
+                          bounded buffer with the rest of the batch, this screen
+                          has no copy button and no stored log, and the run id
+                          goes with the page. Everything the reader is sent after
+                          - the whole log and its download, the exit code, which
+                          of the once-per-upload stages ran - is on that run's
+                          own page, and finding it by hand meant picking it out
+                          of the history by filename and clock. */}
+                      {Boolean(item.runId) && canReadRuns && (
+                        <Button
+                          component={RouterLink}
+                          to={`/simple/runs/${encodeURIComponent(item.runId ?? '')}`}
+                          size="small"
+                          color="inherit"
+                          aria-label={`${item.file.name} 실행 상세`}
+                          sx={{ flexShrink: 0 }}
+                        >
+                          실행 상세
+                        </Button>
+                      )}
                       {!running && (
                         <IconButton size="small" aria-label={`${item.file.name} 제거`} onClick={() => removeItem(item.key)}>
                           <DeleteOutlineRoundedIcon fontSize="small" />
