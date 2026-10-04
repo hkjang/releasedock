@@ -15,18 +15,29 @@ class TestEventSource extends EventTarget {
   onmessage: ((event: MessageEvent<string>) => void) | null = null;
   onerror: ((event: Event) => void) | null = null;
   readonly withCredentials: boolean;
+  // The spec's numbers, as the browser reports them: 0 CONNECTING, 1 OPEN,
+  // 2 CLOSED.
+  readyState = 1;
   constructor(readonly url: string, init?: EventSourceInit) {
     super();
     this.withCredentials = init?.withCredentials ?? false;
     TestEventSource.instances.push(this);
   }
-  close() { this.closed = true; }
+  close() { this.closed = true; this.readyState = 2; }
   emit(type: string, data = '', lastEventId = '') {
     const event = new MessageEvent(type, { data, lastEventId });
     if (type === 'open') this.onopen?.(event);
     if (type === 'message') this.onmessage?.(event);
     if (type === 'error') this.onerror?.(event);
     this.dispatchEvent(event);
+  }
+  // The browser fires error both when it has given the stream up (CLOSED) and
+  // when it is about to retry by itself (CONNECTING); only the state tells the
+  // two apart.
+  emitError(readyState: number) {
+    this.readyState = readyState;
+    if (readyState === 2) this.closed = true;
+    this.emit('error');
   }
 }
 
@@ -114,6 +125,64 @@ describe('release live logs through App', () => {
     const next = await reconnected(2, 0);
     await timeout(next);
     await reconnected(3, 0);
+  });
+
+  describe('once the browser gives the stream up', () => {
+    const lostNotice = () => screen.queryByText(/실시간 로그 연결이 끊겼습니다/);
+    const reconnectButton = () => screen.queryByRole('button', { name: '다시 연결' });
+
+    it('stays quiet while the browser is still retrying by itself', async () => {
+      const { source } = await renderPage();
+      await emit(source, 'open');
+      await act(async () => source.emitError(0));
+      expect(lostNotice()).not.toBeInTheDocument();
+      expect(reconnectButton()).toBeNull();
+      expect(screen.getByText('로그 연결 대기')).toBeVisible();
+      expect(TestEventSource.instances).toHaveLength(1);
+    });
+
+    it('warns on a closed stream and resumes one stream from the last cursor when asked', async () => {
+      const { source } = await renderPage();
+      await emit(source, 'open');
+      await emit(source, 'log', JSON.stringify(line(57)), '57');
+      await act(async () => source.emitError(2));
+      expect(lostNotice()).toBeVisible();
+      // The warning alone must not open anything; only the operator does.
+      expect(TestEventSource.instances).toHaveLength(1);
+      expect(screen.getByText('server line 57')).toBeVisible();
+      fireEvent.click(screen.getByRole('button', { name: '다시 연결' }));
+      const next = await reconnected(2, 57);
+      expect(screen.getByText('server line 57')).toBeVisible();
+      await emit(next, 'open');
+      expect(lostNotice()).not.toBeInTheDocument();
+      await emit(next, 'log', JSON.stringify(line(58)), '58');
+      expect(screen.getByText('server line 58')).toBeVisible();
+      // A replacement the server also refuses has to say so again.
+      await act(async () => next.emitError(2));
+      expect(lostNotice()).toBeVisible();
+      expect(TestEventSource.instances).toHaveLength(2);
+    });
+
+    it('stays quiet when an error trails a stream that ended normally', async () => {
+      const { source } = await renderPage();
+      await emit(source, 'open');
+      await emit(source, 'end', '{}');
+      await act(async () => source.emitError(2));
+      expect(lostNotice()).not.toBeInTheDocument();
+      expect(TestEventSource.instances).toHaveLength(1);
+    });
+
+    it('drops the warning when the route moves to another release', async () => {
+      const { source } = await renderPage();
+      await act(async () => source.emitError(2));
+      expect(lostNotice()).toBeVisible();
+      await act(async () => {
+        window.history.pushState({}, '', '/releases/release-2');
+        window.dispatchEvent(new PopStateEvent('popstate'));
+      });
+      await reconnected(2, 0, 'release-2');
+      expect(lostNotice()).not.toBeInTheDocument();
+    });
   });
 
   it('reads raw/enveloped payload IDs and message events, preserves plain text and never retreats', async () => {
@@ -241,6 +310,16 @@ describe('release live logs through App', () => {
       expect(notice()).toBeVisible();
       fireEvent.click(screen.getByRole('button', { name: '지우기' }));
       expect(notice()).not.toBeInTheDocument();
+    }, SLOW_RENDER_TIMEOUT);
+
+    it('keeps warning after a manual reconnect', async () => {
+      const { source } = await renderPage();
+      await emitMany(source, ids(LOG_DISPLAY_LIMIT + 1));
+      await act(async () => source.emitError(2));
+      fireEvent.click(screen.getByRole('button', { name: '다시 연결' }));
+      await reconnected(2, LOG_DISPLAY_LIMIT + 1);
+      expect(notice()).toBeVisible();
+      expect(screen.getByText(`server line ${LOG_DISPLAY_LIMIT + 1}`)).toBeVisible();
     }, SLOW_RENDER_TIMEOUT);
 
     it('stops warning after leaving and re-entering the tab', async () => {
