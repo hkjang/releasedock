@@ -39,6 +39,9 @@ import { PageError, PageLoading } from '../../components/Feedback';
 import { PageHeader } from '../../components/PageHeader';
 import { SimpleReleaseStatusChip, StatusChip } from '../../components/StatusChip';
 import { useAsync } from '../../hooks/useAsync';
+// Reused rather than restated: two readings of the same readyState would be
+// free to drift apart, and simple mode already settled what CLOSED means.
+import { streamDisconnected } from '../simple/SimpleRunDetailPage';
 import type { Release, ReleaseStep, StepStatus } from '../../types/domain';
 import { formatBytes, formatDate, formatDuration } from '../../utils/format';
 
@@ -82,6 +85,7 @@ export const EMPTY_RELEASE_LOGS: ReleaseLogState = { lines: [], truncated: false
 function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
   const [logs, setLogs] = useState<ReleaseLogState>(EMPTY_RELEASE_LOGS);
   const [connected, setConnected] = useState(false);
+  const [streamLost, setStreamLost] = useState(false);
   const sequence = useRef(0);
   const cursor = useRef(0);
   const [streamAttempt, setStreamAttempt] = useState(0);
@@ -92,6 +96,7 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
     cursor.current = 0;
     setLogs(EMPTY_RELEASE_LOGS);
     setConnected(false);
+    setStreamLost(false);
   }, [releaseId, enabled]);
 
   useEffect(() => {
@@ -102,7 +107,10 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
       const id = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
       if (typeof id === 'number' && Number.isSafeInteger(id) && id > cursor.current) cursor.current = id;
     };
-    source.onopen = () => setConnected(true);
+    source.onopen = () => {
+      setConnected(true);
+      setStreamLost(false);
+    };
     const receiveLog = (rawEvent: Event) => {
       if (stopped) return;
       const event = rawEvent as MessageEvent<string>;
@@ -142,14 +150,37 @@ function useReleaseLogs(releaseId: string | undefined, enabled: boolean) {
         // Unknown end frames must not start an automatic reconnect loop.
       }
     });
-    source.onerror = () => setConnected(false);
+    source.onerror = () => {
+      setConnected(false);
+      // The browser fires error both when it is about to retry on its own
+      // (CONNECTING) and when it has given the stream up (CLOSED); only the
+      // second leaves the log stopped for good. It also fires after the end
+      // frame closed the stream here, where readyState is CLOSED too but
+      // nothing was lost - hence the stopped guard.
+      if (!stopped && streamDisconnected(source.readyState)) setStreamLost(true);
+    };
     return () => {
       stopped = true;
       source.close();
     };
   }, [releaseId, enabled, streamAttempt]);
 
-  return { logs: logs.lines, truncated: logs.truncated, connected, clear: () => setLogs(EMPTY_RELEASE_LOGS) };
+  // One replacement stream, opened only when the operator asks: the usual
+  // reason the server closed this one is its three-per-user stream limit, and
+  // retrying on a timer would spend that same budget against it.
+  const reconnect = () => {
+    setStreamLost(false);
+    setStreamAttempt((current) => current + 1);
+  };
+
+  return {
+    logs: logs.lines,
+    truncated: logs.truncated,
+    connected,
+    streamLost,
+    clear: () => setLogs(EMPTY_RELEASE_LOGS),
+    reconnect,
+  };
 }
 
 function StepIcon({ status }: { status: StepStatus }) {
@@ -314,7 +345,7 @@ function ReleaseActions({ release, onUpdated }: { release: Release; onUpdated: (
 }
 
 function LogPanel({ releaseId, enabled }: { releaseId: string; enabled: boolean }) {
-  const { logs, truncated, connected, clear } = useReleaseLogs(releaseId, enabled);
+  const { logs, truncated, connected, streamLost, clear, reconnect } = useReleaseLogs(releaseId, enabled);
   const endRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   useEffect(() => {
@@ -338,6 +369,18 @@ function LogPanel({ releaseId, enabled }: { releaseId: string; enabled: boolean 
           <Button size="small" onClick={clear} disabled={!logs.length}>지우기</Button>
         </Stack>
       </Stack>
+      {/* The release carries on without this stream, and the step timeline
+          keeps reporting progress, so a log that silently stopped reads as a
+          release that stopped producing output. */}
+      {streamLost && (
+        <Alert
+          severity="warning"
+          sx={{ mb: 1.5 }}
+          action={<Button color="inherit" size="small" onClick={reconnect}>다시 연결</Button>}
+        >
+          실시간 로그 연결이 끊겼습니다. 아래 로그는 끊긴 시점까지입니다. 릴리즈 실행 자체는 계속 진행됩니다.
+        </Alert>
+      )}
       {truncated && (
         <Alert severity="warning" sx={{ mb: 1.5 }}>
           표시 한도를 넘어 오래된 로그 줄이 화면에서 빠졌습니다. 현재 최근 {logs.length.toLocaleString()}줄만 표시합니다.
