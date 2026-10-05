@@ -1558,3 +1558,110 @@ func (s *Server) streamReleaseLogs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// maxReleaseLogPage bounds one page of stored log lines, matching the simple
+// mode cap so neither mode can be asked for an unbounded response.
+const maxReleaseLogPage = 2000
+
+// listReleaseLogs returns stored output for a release. The SSE stream only
+// carries lines written from the cursor on and the display drops the oldest
+// once it is full, so this is the only way back to a line that scrolled out of
+// the live view or landed after the browser gave the stream up. `format=text`
+// returns the whole log as a plain download. The field names and the cursor
+// contract are the simple mode ones, because a caller that already reads one
+// log must not have to learn a second shape.
+func (s *Server) listReleaseLogs(w http.ResponseWriter, r *http.Request) {
+	releaseID := r.PathValue("id")
+	var appName, version, status string
+	err := s.store.Pool.QueryRow(r.Context(),
+		`SELECT a.name,r.version,r.status FROM releases r JOIN applications a ON a.id=r.application_id WHERE r.id=$1`,
+		releaseID).Scan(&appName, &version, &status)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeError(w, 404, "not_found", "release not found")
+		return
+	}
+	if err != nil {
+		writeError(w, 500, "database_error", "could not load release")
+		return
+	}
+	if strings.EqualFold(r.URL.Query().Get("format"), "text") {
+		s.downloadReleaseLog(w, r, releaseID, releaseLogLabel(appName, version), status)
+		return
+	}
+	after, _ := strconv.ParseInt(r.URL.Query().Get("after"), 10, 64)
+	limit := maxReleaseLogPage
+	if requested, convErr := strconv.Atoi(r.URL.Query().Get("limit")); convErr == nil && requested > 0 && requested < limit {
+		limit = requested
+	}
+	// The same join and the same order as streamReleaseLogs, so a caller that
+	// pages through the stored log and one that follows the stream see the same
+	// rows in the same order.
+	rows, err := s.store.Pool.Query(r.Context(),
+		`SELECT l.id,l.stream,l.payload,l.created_at FROM release_job_logs l JOIN release_jobs j ON j.id=l.job_id
+		 WHERE j.release_id=$1 AND l.id>$2 ORDER BY l.id LIMIT $3`, releaseID, after, limit)
+	if err != nil {
+		writeError(w, 500, "database_error", "could not read release logs")
+		return
+	}
+	defer rows.Close()
+	items := []map[string]any{}
+	// A page with no rows leaves the cursor where the caller had it. Reporting 0
+	// instead would tell a caller that asked past the end of the log to start
+	// over from the first line.
+	lastID := after
+	for rows.Next() {
+		var id int64
+		var stream string
+		var payload []byte
+		var created time.Time
+		if rows.Scan(&id, &stream, &payload, &created) != nil {
+			writeError(w, 500, "database_error", "could not read release logs")
+			return
+		}
+		items = append(items, map[string]any{"id": id, "stream": stream, "message": string(payload), "createdAt": created})
+		lastID = id
+	}
+	writeJSON(w, 200, map[string]any{
+		"items":   items,
+		"lastId":  lastID,
+		"hasMore": len(items) == limit,
+	})
+}
+
+func (s *Server) downloadReleaseLog(w http.ResponseWriter, r *http.Request, releaseID, label, status string) {
+	rows, err := s.store.Pool.Query(r.Context(),
+		`SELECT l.stream,l.payload FROM release_job_logs l JOIN release_jobs j ON j.id=l.job_id
+		 WHERE j.release_id=$1 ORDER BY l.id`, releaseID)
+	if err != nil {
+		writeError(w, 500, "database_error", "could not read release logs")
+		return
+	}
+	defer rows.Close()
+	writeReleaseLogDownload(w, rows, label, status, releaseID)
+}
+
+// releaseLogLabel is what an operator recognises a release by in a saved file
+// name. A release id is a uuid, so several logs of the same application could
+// not be told apart without opening them. A part that is missing is dropped
+// rather than joined, because a release can be stored before it has a version.
+func releaseLogLabel(appName, version string) string {
+	parts := make([]string, 0, 2)
+	for _, part := range []string{appName, version} {
+		if trimmed := strings.TrimSpace(part); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, "-")
+}
+
+// writeReleaseLogDownload sends the headers and the status line first and then
+// streams the rows, which is what lets a read that fails part way through
+// report itself as a line in the file: see writeSimpleRunLog, whose rendering
+// and truncation notice this reuses so the two modes cannot drift apart.
+func writeReleaseLogDownload(w http.ResponseWriter, rows logRowScanner, label, status, releaseID string) {
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Disposition", runLogDisposition(label, status, releaseID))
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	writeSimpleRunLog(w, rows)
+}

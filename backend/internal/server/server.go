@@ -298,6 +298,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/releases/{id}/reject", s.withPermission("releases.reject", s.rejectRelease))
 	mux.HandleFunc("POST /api/v1/releases/{id}/rollback", s.withPermission("releases.submit", s.rollbackRelease))
 	mux.HandleFunc("POST /api/v1/releases/{id}/retry", s.withPermission("releases.submit", s.retryRelease))
+	mux.HandleFunc("GET /api/v1/releases/{id}/logs", s.withPermission("releases.read", s.listReleaseLogs))
 	mux.HandleFunc("GET /api/v1/releases/{id}/logs/stream", s.withPermission("releases.read", s.streamReleaseLogs))
 	mux.HandleFunc("GET /api/v1/jobs", s.withPermission("releases.read", s.listJobs))
 	mux.HandleFunc("POST /api/v1/ai/chat/completions", s.withPermission("ai.use", s.proxyAI))
