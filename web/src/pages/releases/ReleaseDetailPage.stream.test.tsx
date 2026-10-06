@@ -65,13 +65,13 @@ const ids = (count: number, first = 1) => Array.from({ length: count }, (_, inde
 const SLOW_RENDER_TIMEOUT = 30_000;
 const copiedBody = (lineIds: number[]) => lineIds.map((id) => `${release.createdAt} stdout server line ${id}`).join('\n');
 
-async function renderPage() {
+async function renderPage(releaseId = release.id) {
   vi.spyOn(api, 'version').mockResolvedValue({ version: '0.5.24' });
   vi.spyOn(api, 'me').mockResolvedValue({
     id: 'user-1', username: 'deployer', displayName: '배포 담당자', roles: ['developer'], permissions: ['releases.read'],
   });
   vi.spyOn(api, 'release').mockImplementation(async (id) => ({ ...release, id }));
-  window.history.replaceState({}, '', '/releases/release-1');
+  window.history.replaceState({}, '', `/releases/${encodeURIComponent(releaseId)}`);
   const view = render(<ThemeProvider theme={theme}><App /></ThemeProvider>);
   fireEvent.click(await screen.findByRole('tab', { name: '실시간 로그' }));
   await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
@@ -163,6 +163,13 @@ describe('release live logs through App', () => {
       expect(TestEventSource.instances).toHaveLength(2);
     });
 
+    it('sends the reader to the stored log for the lines after the cut', async () => {
+      const { source } = await renderPage();
+      await emit(source, 'open');
+      await act(async () => source.emitError(2));
+      expect(lostNotice()).toHaveTextContent('로그 내려받기');
+    });
+
     it('stays quiet when an error trails a stream that ended normally', async () => {
       const { source } = await renderPage();
       await emit(source, 'open');
@@ -225,6 +232,29 @@ describe('release live logs through App', () => {
     expect(fresh.closed).toBe(true);
     await timeout(fresh);
     expect(TestEventSource.instances).toHaveLength(3);
+  });
+
+  describe('the stored log download', () => {
+    const downloadLink = () => screen.getByRole('link', { name: '로그 내려받기' });
+
+    it('stays reachable while the view holds no lines at all', async () => {
+      await renderPage();
+      // The stored log owes nothing to this buffer, and an empty buffer is
+      // precisely when a reader needs it, so this one must not copy the
+      // emptiness guard the clear and copy controls carry.
+      expect(screen.getByText('실행 로그가 도착하면 여기에 실시간으로 표시됩니다.')).toBeVisible();
+      expect(screen.getByRole('button', { name: '지우기' })).toBeDisabled();
+      expect(downloadLink()).toHaveAttribute('href', '/api/v1/releases/release-1/logs?format=text');
+      // The href alone does not settle it: a disabled MUI link keeps its href
+      // and only stops being reachable through aria-disabled and tabindex.
+      expect(downloadLink()).not.toHaveAttribute('aria-disabled');
+      expect(downloadLink()).toHaveAttribute('tabindex', '0');
+    });
+
+    it('percent-encodes the release id the route carried in', async () => {
+      await renderPage('release 1');
+      expect(downloadLink()).toHaveAttribute('href', '/api/v1/releases/release%201/logs?format=text');
+    });
   });
 
   it('does not carry the cursor, displayed lines or connected state to another release route', async () => {
@@ -298,6 +328,12 @@ describe('release live logs through App', () => {
       expect(screen.queryByText('server line 1')).not.toBeInTheDocument();
       expect(screen.getByText(`server line ${LOG_DISPLAY_LIMIT + 1}`)).toBeVisible();
       expect(await copyLog()).toBe(`${RELEASE_LOG_TRUNCATED_NOTICE}\n${copiedBody(ids(LOG_DISPLAY_LIMIT, 2))}`);
+    }, SLOW_RENDER_TIMEOUT);
+
+    it('sends the reader to the stored log for the lines pushed out', async () => {
+      const { source } = await renderPage();
+      await emitMany(source, ids(LOG_DISPLAY_LIMIT + 1));
+      expect(notice()).toHaveTextContent('로그 내려받기');
     }, SLOW_RENDER_TIMEOUT);
 
     it('keeps warning after a max_duration reconnect and stops once the buffer is emptied', async () => {

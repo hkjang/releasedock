@@ -468,6 +468,7 @@ export const api = {
       body: comment ? { comment } : {},
     }),
   releaseLogStreamUrl: (id: string) => `${API_BASE}/releases/${encodeURIComponent(id)}/logs/stream`,
+  releaseLogDownloadUrl: (id: string) => `${API_BASE}/releases/${encodeURIComponent(id)}/logs?format=text`,
 
 	applications: () => request<PageResult<Application> | Application[]>('/applications?limit=200&offset=0&activeOnly=true'),
 	environments: () => request<PageResult<Environment> | Environment[]>('/environments?limit=200&offset=0&activeOnly=true'),

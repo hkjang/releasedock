@@ -3,6 +3,7 @@ import CancelRoundedIcon from '@mui/icons-material/CancelRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import ContentCopyRoundedIcon from '@mui/icons-material/ContentCopyRounded';
 import DownloadDoneRoundedIcon from '@mui/icons-material/DownloadDoneRounded';
+import DownloadRoundedIcon from '@mui/icons-material/DownloadRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import ErrorRoundedIcon from '@mui/icons-material/ErrorRounded';
 import HourglassTopRoundedIcon from '@mui/icons-material/HourglassTopRounded';
@@ -55,9 +56,9 @@ interface LogEntry {
 
 type ReleaseAction = 'submit-review' | 'review' | 'approve' | 'reject' | 'deploy' | 'rollback' | 'retry' | 'edit';
 
-// LOG_DISPLAY_LIMIT bounds the lines the live log view holds. Full mode streams
-// and nothing else - there is no stored-log query and no download - so a line
-// pushed out of this buffer is gone, and the reader has to be told.
+// LOG_DISPLAY_LIMIT bounds the lines the live log view holds. A line pushed out
+// of this buffer is gone from the view, so the reader has to be told - and told
+// where it went: the server keeps the whole log, which the download reaches.
 export const LOG_DISPLAY_LIMIT = 4999;
 
 // RELEASE_LOG_TRUNCATED_NOTICE leads a copied log the view could not hold whole.
@@ -367,6 +368,18 @@ function LogPanel({ releaseId, enabled }: { releaseId: string; enabled: boolean 
           <Button size="small" onClick={() => setAutoScroll((value) => !value)}>{autoScroll ? '자동 스크롤 켜짐' : '자동 스크롤 꺼짐'}</Button>
           <Tooltip title="로그 복사"><span><IconButton size="small" aria-label="전체 로그 복사" disabled={!logs.length} onClick={() => void copy()}><ContentCopyRoundedIcon fontSize="small" /></IconButton></span></Tooltip>
           <Button size="small" onClick={clear} disabled={!logs.length}>지우기</Button>
+          {/* No emptiness guard, unlike its neighbours: the stored log does not
+              come from this buffer, and a buffer that is empty or short of the
+              whole run is the very reason to reach for it. */}
+          <Button
+            size="small"
+            component="a"
+            href={api.releaseLogDownloadUrl(releaseId)}
+            startIcon={<DownloadRoundedIcon />}
+            variant="outlined"
+          >
+            로그 내려받기
+          </Button>
         </Stack>
       </Stack>
       {/* The release carries on without this stream, and the step timeline
@@ -379,11 +392,13 @@ function LogPanel({ releaseId, enabled }: { releaseId: string; enabled: boolean 
           action={<Button color="inherit" size="small" onClick={reconnect}>다시 연결</Button>}
         >
           실시간 로그 연결이 끊겼습니다. 아래 로그는 끊긴 시점까지입니다. 릴리즈 실행 자체는 계속 진행됩니다.
+          끊긴 뒤의 줄까지 담은 전체 로그는 위의 &lsquo;로그 내려받기&rsquo;로 받을 수 있습니다.
         </Alert>
       )}
       {truncated && (
         <Alert severity="warning" sx={{ mb: 1.5 }}>
           표시 한도를 넘어 오래된 로그 줄이 화면에서 빠졌습니다. 현재 최근 {logs.length.toLocaleString()}줄만 표시합니다.
+          빠진 앞부분까지 담은 전체 로그는 위의 &lsquo;로그 내려받기&rsquo;로 받을 수 있습니다.
         </Alert>
       )}
       <Box
