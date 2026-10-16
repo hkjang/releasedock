@@ -105,6 +105,193 @@ async function openStream(): Promise<TestEventSource> {
   return TestEventSource.instances[0];
 }
 
+// The two packages of one upload. The sibling list links one to the other, and
+// that link stays on the same route - only the id in it changes.
+const RUN_A = 'run-a';
+const RUN_B = 'run-b';
+const FILE_A = 'portal-a.tar.gz';
+const FILE_B = 'portal-b.tar.gz';
+const TRUNCATED_NOTICE = '줄만 표시했습니다';
+const LOG_LOAD_FAILED = '로그를 불러오지 못했습니다.';
+
+type LogPageResponse = { items: SimpleLogLine[]; lastId: number; hasMore: boolean };
+
+// deferred hands a test the two ends of one request, so a response can be made
+// to arrive after the reader has already moved on to another run.
+function deferred<T>() {
+  let settle!: (value: T) => void;
+  let fail!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    settle = resolve;
+    fail = reject;
+  });
+  return { promise, settle, fail };
+}
+
+function siblingRun(id: string, filename: string, sibling: { id: string; filename: string }): SimpleRun {
+  return {
+    ...simpleRun('RUNNING'),
+    id,
+    filename,
+    batchId: 'batch-1',
+    batchLast: false,
+    batchSiblings: [
+      {
+        id: sibling.id,
+        filename: sibling.filename,
+        status: 'SUCCESS',
+        batchLast: true,
+        createdAt: '2026-09-23T00:00:02Z',
+      },
+    ],
+  };
+}
+
+// Renders the real route at run A with the sibling list populated, so the link
+// the reader follows is the production one.
+function renderUploadAtRunA() {
+  vi.spyOn(api, 'version').mockResolvedValue({ version: '0.5.18' });
+  vi.spyOn(api, 'me').mockResolvedValue({
+    id: 'user-1',
+    username: 'deployer',
+    displayName: '배포 담당자',
+    roles: ['operator'],
+    permissions: ['simple.read'],
+  });
+  vi.spyOn(api, 'simpleRun').mockImplementation(async (id: string) =>
+    id === RUN_B
+      ? siblingRun(RUN_B, FILE_B, { id: RUN_A, filename: FILE_A })
+      : siblingRun(RUN_A, FILE_A, { id: RUN_B, filename: FILE_B }),
+  );
+  window.history.replaceState({}, '', `/simple/runs/${RUN_A}`);
+  return render(<ThemeProvider theme={theme}><App /></ThemeProvider>);
+}
+
+function logsPerRun(pages: Record<string, () => Promise<LogPageResponse>>) {
+  vi.spyOn(api, 'simpleRunLogs').mockImplementation((id: string) => {
+    const page = pages[id];
+    if (!page) throw new Error(`no stored log stubbed for ${id}`);
+    return page();
+  });
+}
+
+async function followSiblingLink(filename: string) {
+  const link = await screen.findByRole('link', { name: filename });
+  // The click routes to the other run, which loads its own state; letting that
+  // settle inside act keeps the assertions off a half-rendered screen.
+  await act(async () => {
+    fireEvent.click(link);
+  });
+}
+
+describe('following the sibling link to another run of the same upload', () => {
+  beforeEach(() => {
+    TestEventSource.instances = [];
+    vi.stubGlobal('EventSource', TestEventSource);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('leaves no line of the run it came from on the next run screen', async () => {
+    // Both runs live on the one route, so nothing but the id changes when the
+    // link is followed. A log left behind is read as this run's output, and
+    // that output is what says whether the deployment did what it should.
+    const slowB = deferred<LogPageResponse>();
+    logsPerRun({
+      [RUN_A]: async () => ({ items: [line(5), line(6)], lastId: 6, hasMore: false }),
+      [RUN_B]: () => slowB.promise,
+    });
+    renderUploadAtRunA();
+
+    expect(await screen.findByText('line 6')).toBeVisible();
+    await followSiblingLink(FILE_B);
+
+    expect(await screen.findByText(`운영 서버 · ${FILE_B}`)).toBeVisible();
+    expect(screen.queryByText('line 5')).toBeNull();
+    expect(screen.queryByText('line 6')).toBeNull();
+    expect(screen.getByText('· 0줄')).toBeVisible();
+
+    await act(async () => slowB.settle({ items: [line(20)], lastId: 20, hasMore: false }));
+    expect(await screen.findByText('line 20')).toBeVisible();
+  });
+
+  it('keeps a stored log that arrives late off the run that replaced it and resumes the stream from the new cursor', async () => {
+    // The slow request belongs to the run that was left; its lines and its
+    // cursor are both wrong here. Taking the cursor is the worse half: the live
+    // stream would then resume from the other run's id and skip or replay this
+    // run's lines without anything on screen saying so.
+    const slowA = deferred<LogPageResponse>();
+    const slowB = deferred<LogPageResponse>();
+    logsPerRun({ [RUN_A]: () => slowA.promise, [RUN_B]: () => slowB.promise });
+    renderUploadAtRunA();
+
+    await followSiblingLink(FILE_B);
+    expect(await screen.findByText(`운영 서버 · ${FILE_B}`)).toBeVisible();
+
+    await act(async () => slowA.settle({ items: [line(5)], lastId: 5, hasMore: false }));
+    await act(async () => slowB.settle({ items: [line(20), line(21)], lastId: 21, hasMore: false }));
+
+    expect(await screen.findByText('line 21')).toBeVisible();
+    expect(screen.queryByText('line 5')).toBeNull();
+    await waitFor(() => expect(TestEventSource.open).toHaveLength(1));
+    expect(TestEventSource.instances).toHaveLength(1);
+    expect(TestEventSource.instances[0].url).toContain(RUN_B);
+    expect(TestEventSource.instances[0].url).toContain('after=21');
+  });
+
+  it('drops the truncation notice and the lost-connection warning of the run left behind', async () => {
+    // Both notices describe a log that is no longer on screen. The warning also
+    // offers a reconnect, which would spend one of the three streams the server
+    // allows a user on a stream the run being read never lost.
+    let nextId = 0;
+    const slowB = deferred<LogPageResponse>();
+    logsPerRun({
+      [RUN_A]: async () => {
+        nextId += 1;
+        return { items: [line(nextId)], lastId: nextId, hasMore: true };
+      },
+      [RUN_B]: () => slowB.promise,
+    });
+    renderUploadAtRunA();
+
+    expect(await screen.findByText(TRUNCATED_NOTICE, { exact: false })).toBeVisible();
+    await waitFor(() => expect(TestEventSource.instances).toHaveLength(1));
+    await act(async () => TestEventSource.instances[0].emitError(2));
+    expect(await screen.findByText(DISCONNECTED_NOTICE, { exact: false })).toBeVisible();
+
+    await followSiblingLink(FILE_B);
+
+    expect(await screen.findByText(`운영 서버 · ${FILE_B}`)).toBeVisible();
+    expect(screen.queryByText(TRUNCATED_NOTICE, { exact: false })).toBeNull();
+    expect(screen.queryByText(DISCONNECTED_NOTICE, { exact: false })).toBeNull();
+    expect(screen.queryByRole('button', { name: '다시 연결' })).toBeNull();
+
+    await act(async () => slowB.settle({ items: [line(20)], lastId: 20, hasMore: false }));
+    expect(await screen.findByText('line 20')).toBeVisible();
+  });
+
+  it('keeps a log failure reported late off the run that replaced it', async () => {
+    // The run being read loaded its log without trouble. An error raised by the
+    // request of the run that was left reads as this run's log being unreadable.
+    const slowA = deferred<LogPageResponse>();
+    logsPerRun({
+      [RUN_A]: () => slowA.promise,
+      [RUN_B]: async () => ({ items: [line(20)], lastId: 20, hasMore: false }),
+    });
+    renderUploadAtRunA();
+
+    await followSiblingLink(FILE_B);
+    expect(await screen.findByText('line 20')).toBeVisible();
+
+    await act(async () => slowA.fail(new Error('down')));
+
+    expect(screen.queryByText(LOG_LOAD_FAILED)).toBeNull();
+    expect(screen.getByText('line 20')).toBeVisible();
+  });
+});
+
 describe('the live log stream of a running deployment', () => {
   beforeEach(() => {
     TestEventSource.instances = [];

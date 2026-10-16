@@ -181,8 +181,21 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
   );
 }
 
+// Both runs of an upload are the one route, so following the sibling list's
+// link changes nothing but the id in useParams. Keying this component on that
+// id makes React unmount it and start a new one, which is what separates the
+// two runs: every piece of state here - the lines on screen, the notices about
+// them, and the cursor the live stream resumes from - begins again, and a
+// stored-log request the previous run left in flight resolves into a component
+// that is gone rather than onto this run's screen. A reset effect listing the
+// state to clear would have to be kept in step with that state by hand, and the
+// one line it is missing is a log read as this run's output when it is not.
 export function SimpleRunDetailPage() {
   const { id = '' } = useParams();
+  return <RunDetail key={id} id={id} />;
+}
+
+function RunDetail({ id }: { id: string }) {
   const run = useAsync(() => api.simpleRun(id), [id]);
   const [logs, setLogs] = useState<SimpleLogLine[]>([]);
   const [logError, setLogError] = useState('');
